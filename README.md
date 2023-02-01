@@ -36,7 +36,7 @@ npm i telebirr-js
 
 ## Usage
 ### Required information's
-you will receive the required information from Tele with information which looks like theis :arrow_down:
+you will receive the required information from Tele with information which looks like this :arrow_down:
 
 | merchant name   | short code   |  APP ID | APP KEY  |  Public ID | H5  | InApp Payment   |
 |---|---|---|---|---|---|---|
