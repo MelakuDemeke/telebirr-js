@@ -8,8 +8,8 @@
 ![GitHub branch checks state](https://img.shields.io/github/checks-status/MelakuDemeke/telebirr-js/main)
 ![GitHub repo size](https://img.shields.io/github/repo-size/MelakuDemeke/telebirr-js)
 ![GitHub issues](https://img.shields.io/github/issues/MelakuDemeke/telebirr-js)
-![npm](https://img.shields.io/npm/dt/telebirr-js?color=green&logo=npm&logoColor=white)
-![npm bundle size](https://img.shields.io/bundlephobia/minzip/telebirr-js)
+![npm](https://img.shields.io/npm/dt/@melakudemeke/telebirr-js?color=green&logo=npm&logoColor=white)
+![npm bundle size](https://img.shields.io/bundlephobia/minzip/@melakudemeke/telebirr-js)
 ![GitHub](https://img.shields.io/github/license/MelakuDemeke/telebirr-js?style=flat)
 ![GitHub Repo stars](https://img.shields.io/github/stars/MelakuDemeke/telebirr-js?logo=github&style=flat)
 ![GitHub forks](https://img.shields.io/github/forks/MelakuDemeke/telebirr-js?logo=github&style=falt)
@@ -25,13 +25,13 @@ This library provides a simple, `async`/`await`-based API for handling Telebirr 
 ### Installation
 
 ```bash
-npm install telebirr-js
+npm install @melakudemeke/telebirr-js
 ```
 
 ### Basic Usage
 
 ```ts
-import { Config, Telebirr } from 'telebirr-js';
+import { Config, Telebirr } from '@melakudemeke/telebirr-js';
 
 // Configure (test environment)
 const config = Config.forTest({
@@ -134,7 +134,7 @@ Default endpoints used by the library:
 ### Handle Payment Return
 
 ```ts
-import { ReturnUrlHandler, TelebirrError } from 'telebirr-js';
+import { ReturnUrlHandler, TelebirrError } from '@melakudemeke/telebirr-js';
 
 app.get('/telebirr/return', async (req, res) => {
   try {
@@ -168,7 +168,7 @@ app.get('/telebirr/return', async (req, res) => {
 ### Handle Payment Notifications
 
 ```ts
-import { NotificationHandler } from 'telebirr-js';
+import { NotificationHandler } from '@melakudemeke/telebirr-js';
 
 app.post('/telebirr/notify', express.text({ type: '*/*' }), (req, res) => {
   const notification = NotificationHandler.parse(req.body);
@@ -252,7 +252,7 @@ each `(message, meta?) => void`) — `console`, `pino`, `winston`, or a small
 wrapper around any of them all work directly:
 
 ```ts
-import { Telebirr } from 'telebirr-js';
+import { Telebirr } from '@melakudemeke/telebirr-js';
 
 const client = new Telebirr(config, console); // request/response logging (secrets & PII redacted)
 ```
@@ -264,7 +264,7 @@ The third constructor argument accepts any `HttpClient`
 without hitting the network:
 
 ```ts
-import { Telebirr, HttpResponse, type HttpClient } from 'telebirr-js';
+import { Telebirr, HttpResponse, type HttpClient } from '@melakudemeke/telebirr-js';
 
 const fake: HttpClient = {
   async post(url, headers, body) {
@@ -282,7 +282,7 @@ them all in one place. API failures throw `ApiError`, which exposes
 `httpStatus`, `errorCode`, and `responseBody`.
 
 ```ts
-import { TelebirrError, ApiError, InvalidParameterError } from 'telebirr-js';
+import { TelebirrError, ApiError, InvalidParameterError } from '@melakudemeke/telebirr-js';
 
 try {
   await client.createCheckoutUrl('Order 123', '100.00');
@@ -327,7 +327,7 @@ This project is licensed under the MIT License.
 
 - [Telebirr Developer Portal](https://developer.ethiotelecom.et/)
 - [Telebirr H5 C2B Integration Guide](https://developer.ethiotelecom.et/docs/H5%20C2B%20Web%20Payment%20Integration%20Quick%20Guide/requestCreateOrder)
-- [npm package](https://www.npmjs.com/package/telebirr-js)
+- [npm package](https://www.npmjs.com/package/@melakudemeke/telebirr-js)
 - [GitHub Repository](https://github.com/MelakuDemeke/telebirr-js)
 - Looking for a PHP integration? See [telebirr-php](https://github.com/MelakuDemeke/telebirr-php)
 

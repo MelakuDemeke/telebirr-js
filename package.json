@@ -1,5 +1,5 @@
 {
-  "name": "telebirr-js",
+  "name": "@melakudemeke/telebirr-js",
   "version": "3.0.0",
   "description": "Modern TypeScript/Node.js library for Telebirr Web Checkout (H5 C2B) payments.",
   "type": "module",
