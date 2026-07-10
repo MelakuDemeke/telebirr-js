@@ -1,0 +1,69 @@
+{
+  "name": "telebirr-js",
+  "version": "3.0.0",
+  "description": "Modern TypeScript/Node.js library for Telebirr Web Checkout (H5 C2B) payments.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "keywords": [
+    "telebirr",
+    "ethio-telecom",
+    "ethiopia",
+    "payment",
+    "payment-gateway",
+    "checkout",
+    "h5",
+    "c2b",
+    "mobile-money",
+    "typescript"
+  ],
+  "author": {
+    "name": "Melaku Demeke",
+    "email": "melaku.demeke789@gmail.com"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MelakuDemeke/telebirr-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MelakuDemeke/telebirr-js/issues"
+  },
+  "homepage": "https://github.com/MelakuDemeke/telebirr-js#readme",
+  "dependencies": {
+    "undici": "^7.28.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.7"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
