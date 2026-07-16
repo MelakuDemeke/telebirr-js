@@ -1,6 +1,7 @@
 export { CheckoutResult } from './CheckoutResult.js';
 export { Config } from './Config.js';
 export type { ConfigOptions, TelebirrEnvironment } from './Config.js';
+export { KeyNormalizer } from './KeyNormalizer.js';
 export { NotificationHandler } from './NotificationHandler.js';
 export type { PaymentInfo } from './NotificationHandler.js';
 export { NotificationResponse } from './NotificationResponse.js';
@@ -13,9 +14,18 @@ export { SignatureVerifier } from './SignatureVerifier.js';
 export { Signer } from './Signer.js';
 export type { SignableRequest } from './Signer.js';
 export { Telebirr } from './Telebirr.js';
-export type { TelebirrApiResponse } from './Telebirr.js';
+export type {
+  TelebirrApiResponse,
+  TelebirrOptions,
+  RetryOptions,
+  OrderStatus,
+  CreateOrderResponse,
+  CreateOrderBizContent,
+  QueryOrderResponse,
+  QueryOrderBizContent,
+} from './Telebirr.js';
 
-export { ApiError } from './errors/ApiError.js';
+export { ApiError, TRANSIENT_TELEBIRR_ERROR_CODES } from './errors/ApiError.js';
 export { ConfigurationError } from './errors/ConfigurationError.js';
 export { InvalidParameterError } from './errors/InvalidParameterError.js';
 export { TelebirrError } from './errors/TelebirrError.js';
@@ -25,6 +35,7 @@ export { HttpClientError } from './http/HttpClientError.js';
 export { HttpResponse } from './http/HttpResponse.js';
 export { UndiciHttpClient } from './http/UndiciHttpClient.js';
 export type { UndiciHttpClientOptions } from './http/UndiciHttpClient.js';
+export { TELEBIRR_CA_CERTIFICATES } from './http/telebirr-ca.js';
 
 export type { Logger } from './logger/Logger.js';
 export { NullLogger } from './logger/Logger.js';

@@ -91,9 +91,18 @@ You'll receive these from Telebirr:
 - `appSecret` - Your App Secret
 - `merchantAppId` - Your Merchant App ID
 - `merchantCode` - Your Merchant Code (6-digit)
-- `privateKey` - Your RSA Private Key (PEM format)
+- `privateKey` - Your RSA Private Key
 - `notifyUrl` - Server-to-server notification URL (required)
 - `redirectUrl` - User return URL after payment (optional)
+
+### Key formats — bare base64 is fine
+
+Ethio Telecom issues merchant keys as **bare base64 DER** (a single long
+`MIIEvgIBADANBgk…` line, no `-----BEGIN…-----` armor). Pass it exactly as
+issued — the library normalizes it to PEM automatically, picking the right
+header (PKCS#8 vs PKCS#1) for you. Proper PEM works too, including PEM whose
+newlines were flattened to literal `\n` by a `.env` file. You will never see
+`ERR_OSSL_UNSUPPORTED` because of key formatting.
 
 ### Environment Setup
 
@@ -106,10 +115,23 @@ const config = Config.forTest({ ... });
 // Production
 const config = Config.forProduction({ ... });
 
-// Auto-detect from environment variable
-const config = Config.fromEnvironment({ ... });
-// Set: TELEBIRR_ENVIRONMENT=production
+// Zero-config: read everything from environment variables
+const config = Config.fromEnvironment();
 ```
+
+`Config.fromEnvironment()` reads (any explicit option overrides its variable):
+
+| Variable | Maps to |
+|---|---|
+| `TELEBIRR_ENVIRONMENT` (then `APP_ENV`/`NODE_ENV`) | `environment` |
+| `TELEBIRR_FABRIC_APP_ID` | `fabricAppId` |
+| `TELEBIRR_APP_SECRET` | `appSecret` |
+| `TELEBIRR_MERCHANT_APP_ID` | `merchantAppId` |
+| `TELEBIRR_MERCHANT_CODE` | `merchantCode` |
+| `TELEBIRR_PRIVATE_KEY` | `privateKey` (PEM or bare base64) |
+| `TELEBIRR_NOTIFY_URL` | `notifyUrl` |
+| `TELEBIRR_REDIRECT_URL` | `redirectUrl` |
+| `TELEBIRR_PUBLIC_KEY` | `telebirrPublicKey` |
 
 Default endpoints used by the library:
 
@@ -120,16 +142,36 @@ Default endpoints used by the library:
 
 ## 💡 Key Features
 
-- ✅ **Simple API** - One-call checkout URL generation, fully `async`/`await`
-- ✅ **Automatic Token Management** - No need to handle tokens manually
+- ✅ **Simple API** - One-call checkout (`createCheckoutUrl`) and one-call verification (`getOrderStatus`), fully `async`/`await`
+- ✅ **Automatic Token Management** - Fabric tokens are fetched, cached until expiry, and refreshed for you
+- ✅ **Key normalization** - Bare base64 keys (as Ethio Telecom issues them) or PEM, both just work
+- ✅ **TLS that just works** - Bundles the CA the test gateway forgets to serve; no `verifySsl: false` needed
+- ✅ **Structured errors + opt-in retry** - Branch on `err.telebirrCode`; retry transient sandbox errors with backoff
 - ✅ **Signature Verification** - Built-in helpers for return URLs and notifications
 - ✅ **Helper Classes** - `ReturnUrlHandler`, `NotificationHandler`, `PaymentStatus`
 - ✅ **Environment Support** - Automatic test/production URL handling
-- ✅ **Framework-agnostic** - Works with Express, Next.js, Fastify, plain Node `http`, or any runtime with `fetch`/`Response`
+- ✅ **Framework-agnostic** - Works with Express, Next.js (Node runtime), Fastify, plain Node `http`
 - ✅ **Dual ESM/CJS + full TypeScript types** - `import` or `require`, either way
 - ✅ **Full Compliance** - Follows the Telebirr H5 C2B Web Payment Integration spec
 
 ## 📖 Common Use Cases
+
+### Verify a payment (`getOrderStatus`)
+
+The one-call, server-to-server way to confirm what actually happened to an
+order — the verification counterpart to `createCheckoutUrl`. Token handling
+and response mapping are done for you, and the result is fully typed:
+
+```ts
+const status = await client.getOrderStatus('YOUR_MERCH_ORDER_ID');
+
+status.paid;           // boolean — true ONLY on an explicit success status (fails closed)
+status.tradeStatus;    // e.g. 'PAY_SUCCESS'
+status.amount;         // e.g. '100.00' — VERIFY this against your own order amount
+status.currency;       // 'ETB'
+status.paymentOrderId; // Telebirr's transaction reference (or null)
+status.raw;            // the full queryOrder response if you need more
+```
 
 ### Handle Payment Return
 
@@ -142,16 +184,13 @@ app.get('/telebirr/return', async (req, res) => {
     const paymentData = ReturnUrlHandler.handle(req.query, config);
 
     if (paymentData.isSuccess) {
-      const orderId = paymentData.merchantOrderId;
-
       // The return URL comes through the user's browser and is spoofable even
       // when signed. For anything that fulfils an order, confirm the real
       // status server-to-server before acting on it:
-      const tokenInfo = await client.applyFabricToken();
-      const status = await client.queryOrder(tokenInfo.token, null, orderId);
-      const confirmed = (status.biz_content as Record<string, unknown> | undefined)?.['trade_status'];
-
-      // Update your database / fulfill the order only after this confirmation.
+      const status = await client.getOrderStatus(paymentData.merchantOrderId);
+      if (status.paid && status.amount === expectedAmountFor(paymentData.merchantOrderId)) {
+        // Update your database / fulfill the order — idempotently (see below).
+      }
     }
 
     res.redirect('/order/thank-you');
@@ -164,6 +203,24 @@ app.get('/telebirr/return', async (req, res) => {
   }
 });
 ```
+
+#### Return-URL parameters (the raw contract)
+
+Telebirr redirects the user's browser to your `redirectUrl` with these query
+parameters appended (snake_case):
+
+| Parameter | Meaning |
+|---|---|
+| `merch_order_id` | Your merchant order id, echoed back verbatim |
+| `payment_order_id` | Telebirr's transaction reference |
+| `trade_status` | e.g. `PAY_SUCCESS`, `PAY_FAILED`, `PAY_CANCEL` |
+| `total_amount` | Order amount |
+| `trans_currency` | Currency (`ETB`) |
+| `trans_end_time` | Transaction end time |
+| `sign`, `sign_type` | RSA-PSS signature over the other params |
+
+`ReturnUrlHandler.handle()` verifies the signature and maps these for you —
+the table is here for when you're debugging the raw redirect.
 
 ### Handle Payment Notifications
 
@@ -192,19 +249,76 @@ app.post('/telebirr/notify', express.text({ type: '*/*' }), (req, res) => {
 });
 ```
 
-> **Next.js / Remix / Bun / Deno / Cloudflare Workers:** use
+> **Next.js / Remix:** use
 > `NotificationHandler.respondSuccess(...).toWebResponse()` to get a standard
-> `Response` object instead of calling `.send(res)`.
+> `Response` object instead of calling `.send(res)` — and remember the route
+> must run on the **Node runtime** (see Requirements below).
 
-### Query Order Status
+#### Notification acknowledgement contract
+
+- Telebirr POSTs the notification as a JSON body to your `notifyUrl`.
+- Acknowledge success with **HTTP 200** and a JSON body — this is what
+  `NotificationHandler.respondSuccess()` emits: `{"success": true}`.
+- Any non-2xx status (what `respondError()` emits) tells Telebirr the
+  delivery failed; it will **retry the notification** later. So: respond 200
+  once you have durably recorded the event — even if your own fulfillment
+  work continues asynchronously — and reserve error responses for "I could
+  not record this, please retry".
+- Your `notifyUrl` must be publicly reachable — `localhost` or a private
+  address will never receive anything (the library warns about this at
+  construction time). In development use a tunnel (ngrok, cloudflared).
+
+### The idempotent settlement pattern (recommended)
+
+The browser return and the server notification **race** — either can arrive
+first, both can arrive, and neither should be trusted on its own. The
+production-correct shape:
+
+1. On checkout, store a row keyed by `merchOrderId` with `status='pending'`
+   and the expected `amount`.
+2. On **both** the return handler and the notify handler, call
+   `client.getOrderStatus(merchOrderId)` — never trust the callback params.
+3. Verify `status.paid === true` **and** `status.amount` matches your stored
+   amount.
+4. Grant idempotently with a compare-and-set, so the racing paths can't
+   double-fulfill:
+
+```ts
+async function settle(merchOrderId: string) {
+  const status = await client.getOrderStatus(merchOrderId);
+  if (!status.paid) return;
+
+  // Atomic claim: only one caller flips pending → success.
+  // SQL: UPDATE orders SET status='success'
+  //      WHERE merch_order_id=$1 AND status='pending' AND amount=$2
+  const claimed = await db.claimPendingOrder(merchOrderId, status.amount);
+  if (claimed) {
+    await fulfillOrder(merchOrderId); // runs exactly once
+  }
+}
+```
+
+### Query Order Status (low level)
+
+Prefer `getOrderStatus()` above; the raw call remains available when you need
+the untouched response:
 
 ```ts
 const tokenInfo = await client.applyFabricToken();
 const orderStatus = await client.queryOrder(tokenInfo.token, null, 'YOUR_ORDER_ID');
+// orderStatus.biz_content is typed (QueryOrderBizContent): trade_status,
+// total_amount, payment_order_id, trans_currency, trans_end_time, ...
+```
 
-const tradeStatus = (orderStatus.biz_content as Record<string, unknown> | undefined)?.['trade_status'] as string | undefined;
-if (tradeStatus?.toUpperCase() === 'PAY_SUCCESS') {
-  // Payment successful
+### Check gateway health
+
+The sandbox can be flaky; probe it before a user-facing checkout if you want
+to degrade gracefully:
+
+```ts
+const health = await client.ping(); // never throws
+if (!health.ok) {
+  // show "payment temporarily unavailable" instead of a broken checkout
 }
 ```
 
@@ -227,23 +341,76 @@ const refundResult = await client.refundOrder(
 - **undici** (^7) — the only runtime dependency; it's the HTTP client Node's own global `fetch` is built on, used here so TLS verification, a custom CA bundle, and connect/total timeouts can be configured per-client.
 - Signing/verification use Node's built-in `crypto` module — RSA-PSS, SHA256, MGF1-SHA256, salt length 32 — no extra crypto dependency required.
 
+> **⚠️ Node runtime only — no Edge / Cloudflare Workers.** The library uses
+> `undici` and `node:crypto` (RSA-PSS), which are not available on edge
+> runtimes. In **Next.js**, add `export const runtime = 'nodejs'` to any route
+> handler that touches this library, or the route will fail to build/run on
+> the Edge runtime with confusing errors:
+>
+> ```ts
+> // app/api/telebirr/notify/route.ts
+> export const runtime = 'nodejs';
+> ```
+
 ## ⚙️ Advanced Configuration
 
 ### TLS & timeouts
 
 The default HTTP client verifies the gateway's TLS certificate and applies
 timeouts (a payment gateway must not be called over an unverified or
-unbounded connection). Override only if you must:
+unbounded connection).
+
+**The Telebirr test gateway serves an incomplete certificate chain** (leaf
+only, missing intermediate), which used to fail Node's verification with
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE` and push people toward `verifySsl: false`.
+The library now **bundles the missing intermediate CA** and trusts it *in
+addition to* Node's default root store, so verification works out of the box
+— you should never need `verifySsl: false`. If the gateway rotates to a CA
+the bundle doesn't cover, the error message will say so and explain the
+options; `caBundlePath` adds further certificates without replacing the
+system store.
 
 ```ts
 const config = Config.forProduction({
   // ... credentials ...
-  verifySsl: true,        // default true — leave on in production
-  caBundlePath: undefined, // optional path to a custom CA bundle (PEM)
+  verifySsl: true,        // default true — leave on; the library warns (test) or
+                           // logs an error (production) if you turn it off
+  caBundlePath: undefined, // optional path to an ADDITIONAL CA bundle (PEM)
   timeout: 30,             // total request timeout (seconds)
   connectTimeout: 10,      // connection timeout (seconds)
 });
 ```
+
+### Token caching
+
+`createCheckoutUrl()` and `getOrderStatus()` cache the fabric token until its
+`expirationDate` (minus a 60s safety margin) and reuse it, halving gateway
+round-trips on the hot paths. A rejected token (HTTP 401) drops the cache
+automatically. Opt out for stateless behavior:
+
+```ts
+const client = new Telebirr(config, null, null, { cacheFabricToken: false });
+```
+
+`applyFabricToken()` always performs a real network call (and refreshes the
+cache), so existing manual flows are unaffected.
+
+### Retrying transient gateway errors
+
+The test gateway regularly throws transient infra errors (see the sandbox
+note below). Retry is **opt-in** with exponential backoff:
+
+```ts
+const client = new Telebirr(config, console, null, {
+  retry: { retries: 2, delayMs: 500, maxDelayMs: 5000 },
+});
+```
+
+Only failures where `ApiError.isTransient()` is true are retried: known
+Telebirr infra codes (`49401024991` "southbound service unavailable"),
+HTTP 502/503/504, and transport timeouts/resets. Parameter or auth errors
+fail immediately. The set of codes is exported as
+`TRANSIENT_TELEBIRR_ERROR_CODES` if you need to extend it.
 
 ### Logging
 
@@ -261,25 +428,43 @@ const client = new Telebirr(config, console); // request/response logging (secre
 
 The third constructor argument accepts any `HttpClient`
 (`post(url, headers, body): Promise<HttpResponse>`), so you can unit-test
-without hitting the network:
+without hitting the network. A complete create → settle flow:
 
 ```ts
 import { Telebirr, HttpResponse, type HttpClient } from '@melakudemeke/telebirr-js';
 
-const fake: HttpClient = {
-  async post(url, headers, body) {
-    return new HttpResponse(200, JSON.stringify({ token: 'Bearer TEST' }));
-  },
-};
+// Returns canned responses in order: token, createOrder, token (cached ⇒ skipped), queryOrder.
+function fakeGateway(responses: HttpResponse[]): HttpClient {
+  return {
+    async post(url, headers, body) {
+      const next = responses.shift();
+      if (!next) throw new Error(`unexpected call to ${url}`);
+      return next;
+    },
+  };
+}
+
+const fake = fakeGateway([
+  new HttpResponse(200, JSON.stringify({ token: 'Bearer TEST', expirationDate: String(Date.now() + 3_600_000) })),
+  new HttpResponse(200, JSON.stringify({ code: '00000', biz_content: { prepay_id: 'PID123' } })),
+  new HttpResponse(200, JSON.stringify({
+    code: '00000',
+    biz_content: { trade_status: 'PAY_SUCCESS', total_amount: '100.00', trans_currency: 'ETB', payment_order_id: 'TB1', merch_order_id: 'ORDER123' },
+  })),
+]);
 
 const client = new Telebirr(config, null, fake);
+
+const checkout = await client.createCheckoutUrl('Order 123', '100.00', 'ORDER123'); // uses responses 1–2
+const status = await client.getOrderStatus(checkout.merchOrderId);                  // token is cached ⇒ uses response 3
+// status.paid === true, status.amount === '100.00'
 ```
 
 ### Catching errors
 
 Every error the library throws extends `TelebirrError`, so you can catch
-them all in one place. API failures throw `ApiError`, which exposes
-`httpStatus`, `errorCode`, and `responseBody`.
+them all in one place. API failures throw `ApiError`, which now carries
+Telebirr's parsed error envelope — no more `JSON.parse(err.responseBody)`:
 
 ```ts
 import { TelebirrError, ApiError, InvalidParameterError } from '@melakudemeke/telebirr-js';
@@ -288,7 +473,12 @@ try {
   await client.createCheckoutUrl('Order 123', '100.00');
 } catch (err) {
   if (err instanceof ApiError) {
-    console.error(err.httpStatus, err.errorCode, err.responseBody);
+    err.httpStatus;        // e.g. 400
+    err.telebirrCode;      // e.g. '49401024991' — parsed from the body
+    err.telebirrMessage;   // Telebirr's errorMsg
+    err.telebirrSolution;  // Telebirr's errorSolution remediation text
+    err.isTransient();     // true for retryable gateway-side failures
+    err.responseBody;      // raw body, if you need it
   } else if (err instanceof InvalidParameterError) {
     console.error(err.parameterName, err.parameterValue, err.suggestion);
   } else if (err instanceof TelebirrError) {
@@ -296,6 +486,29 @@ try {
   }
 }
 ```
+
+### Amounts & rounding
+
+`amount` accepts `string | number` and is formatted to exactly 2 decimals —
+Telebirr's wire format for ETB. If you store amounts in minor units (cents),
+divide before passing (`amount: cents / 100` → `'100.50'`). Prefer passing a
+**string** (`'100.50'`) when the value came from user input or a DB decimal
+column, sidestepping any binary floating-point surprises; values that would
+lose precision at 2 decimals (e.g. `10.005`) are rounded by `toFixed(2)`.
+
+### ⚠️ Sandbox instability
+
+The **test gateway is frequently unstable** and returns transient infra
+errors that look exactly like integration bugs — most commonly:
+
+```
+errorCode 49401024991: "southbound business service is unavailable"
+```
+
+If your request worked before and suddenly throws a `4940…` code with an
+`errorSolution` suggesting a retry, **it's the gateway, not your code**.
+Wait and retry (or enable the `retry` option above). Don't spend an hour
+debugging a correct integration.
 
 ## 🛠️ Helper Classes
 
@@ -314,6 +527,10 @@ The library provides several helper classes to simplify common tasks:
 - Store credentials in environment variables, not in code
 - Implement idempotency checks for notifications
 - Never trust return URL parameters alone - verify with server-to-server notifications
+
+## 📝 Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for per-version changes and migration notes.
 
 ## 🤝 Contributing
 

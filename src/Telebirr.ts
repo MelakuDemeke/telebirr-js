@@ -8,6 +8,7 @@ import { UndiciHttpClient } from './http/UndiciHttpClient.js';
 import type { Logger } from './logger/Logger.js';
 import { NullLogger } from './logger/Logger.js';
 import { ParameterValidator } from './ParameterValidator.js';
+import { PaymentStatus } from './PaymentStatus.js';
 import { Signer, type SignableRequest } from './Signer.js';
 
 /** Loosely-typed Telebirr API response — the shape varies per endpoint. */
@@ -15,6 +16,88 @@ export type TelebirrApiResponse = Record<string, unknown> & {
   code?: string;
   biz_content?: Record<string, unknown>;
 };
+
+/** `biz_content` of a successful {@link Telebirr.createOrder} response. */
+export interface CreateOrderBizContent extends Record<string, unknown> {
+  prepay_id: string;
+  merch_order_id?: string;
+}
+
+/** Response of {@link Telebirr.createOrder} — `biz_content.prepay_id` is guaranteed present. */
+export type CreateOrderResponse = TelebirrApiResponse & { biz_content: CreateOrderBizContent };
+
+/**
+ * `biz_content` of a {@link Telebirr.queryOrder} response.
+ *
+ * Field names are the snake_case keys Telebirr actually returns; every field
+ * is optional because the gateway omits fields depending on order state.
+ */
+export interface QueryOrderBizContent extends Record<string, unknown> {
+  trade_status?: string;
+  merch_order_id?: string;
+  prepay_id?: string;
+  payment_order_id?: string;
+  total_amount?: string;
+  trans_currency?: string;
+  trans_end_time?: string;
+}
+
+/** Response of {@link Telebirr.queryOrder} with its `biz_content` typed. */
+export type QueryOrderResponse = TelebirrApiResponse & { biz_content?: QueryOrderBizContent };
+
+/**
+ * Normalized result of {@link Telebirr.getOrderStatus} — a server-to-server
+ * confirmed view of an order, safe to settle against.
+ */
+export interface OrderStatus {
+  /** True only when Telebirr reports an explicit success status. Fails closed. */
+  paid: boolean;
+  /** True when Telebirr reports an explicit failure status. */
+  failed: boolean;
+  /** True when Telebirr reports the payment was cancelled. */
+  cancelled: boolean;
+  /** Raw `trade_status` string (e.g. `'PAY_SUCCESS'`). */
+  tradeStatus: string;
+  /** Total amount as reported by Telebirr — verify it against YOUR order amount before granting. */
+  amount: string;
+  currency: string;
+  /** Telebirr's payment order id (their transaction reference), when available. */
+  paymentOrderId: string | null;
+  merchOrderId: string;
+  /** Transaction end time as reported by Telebirr, when available. */
+  transEndTime: string | null;
+  /** The full queryOrder response, for anything not covered above. */
+  raw: QueryOrderResponse;
+}
+
+export interface RetryOptions {
+  /** Retries after the initial attempt. Default 0 (retry disabled). */
+  retries?: number;
+  /** Delay before the first retry in ms; doubles each attempt. Default 500. */
+  delayMs?: number;
+  /** Upper bound for the backoff delay in ms. Default 5000. */
+  maxDelayMs?: number;
+}
+
+export interface TelebirrOptions {
+  /**
+   * Opt-in retry with exponential backoff on transient failures — Telebirr
+   * infra errors like `49401024991` ("southbound service unavailable"),
+   * HTTP 502/503/504, and transport timeouts. See {@link ApiError.isTransient}.
+   */
+  retry?: RetryOptions;
+  /**
+   * Cache the fabric token until its `expirationDate` (minus a safety
+   * margin) and reuse it across calls, halving gateway round-trips on the
+   * hot paths. Default true; set false for stateless behavior.
+   */
+  cacheFabricToken?: boolean;
+}
+
+/** Refresh the cached fabric token this long before its reported expiry. */
+const TOKEN_EXPIRY_SAFETY_MARGIN_MS = 60_000;
+/** Cache TTL when the token response carries no parseable expirationDate. */
+const TOKEN_FALLBACK_TTL_MS = 5 * 60_000;
 
 const SENSITIVE_KEYS = new Set(['sign', 'msisdn', 'phone', 'phone_no', 'phonenumber', 'payer_name', 'customer_name', 'buyer', 'openid', 'open_id', 'id_no', 'email']);
 
@@ -28,17 +111,21 @@ export class Telebirr {
   private readonly signer: Signer;
   private logger: Logger;
   private readonly httpClient: HttpClient;
+  private readonly options: TelebirrOptions;
+  private tokenCache: { token: string; expiresAtMs: number } | null = null;
 
   /**
    * @param config Library configuration.
    * @param logger Any logger matching {@link Logger} (console, pino, winston, ...). Defaults to a no-op.
    * @param httpClient Injectable HTTP client. Defaults to {@link UndiciHttpClient}, which verifies
    *        TLS and applies timeouts using the config's transport settings.
+   * @param options Client behavior: opt-in transient-error retry, token caching.
    */
-  constructor(config: Config, logger?: Logger | null, httpClient?: HttpClient | null) {
+  constructor(config: Config, logger?: Logger | null, httpClient?: HttpClient | null, options?: TelebirrOptions | null) {
     this.config = config;
     this.signer = new Signer(config);
     this.logger = logger ?? new NullLogger();
+    this.options = options ?? {};
     this.httpClient =
       httpClient ??
       new UndiciHttpClient({
@@ -47,6 +134,47 @@ export class Telebirr {
         timeout: config.timeout,
         connectTimeout: config.connectTimeout,
       });
+
+    this.warnOnRiskyConfig();
+  }
+
+  /** Surface configuration footguns loudly at construction time. */
+  private warnOnRiskyConfig(): void {
+    if (!this.config.verifySsl) {
+      if (this.config.isProduction()) {
+        this.logger.error(
+          'verifySsl:false is set against the PRODUCTION gateway — TLS verification is disabled for a payment gateway. ' +
+            'Remove verifySsl:false: this library bundles the Telebirr CA, so verification works without it.'
+        );
+      } else {
+        this.logger.warn('verifySsl:false — TLS verification is disabled. Acceptable only against the TEST gateway, never in production.');
+      }
+    }
+
+    try {
+      const url = new URL(this.config.notifyUrl);
+      const host = url.hostname;
+      const isUnreachable =
+        host === 'localhost' ||
+        host === '::1' ||
+        /^127\./.test(host) ||
+        /^10\./.test(host) ||
+        /^192\.168\./.test(host) ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+        host.endsWith('.local') ||
+        host.endsWith('.internal');
+      if (isUnreachable) {
+        this.logger.warn(
+          `notifyUrl '${this.config.notifyUrl}' points at localhost/a private address — Telebirr's servers cannot reach it, ` +
+            'so the server-to-server payment notification will never arrive. Use a publicly reachable URL ' +
+            '(in development, a tunnel such as ngrok or cloudflared).'
+        );
+      } else if (url.protocol === 'http:') {
+        this.logger.warn(`notifyUrl '${this.config.notifyUrl}' uses plain http:// — use https:// so payment notifications cannot be intercepted.`);
+      }
+    } catch {
+      // Malformed URLs are reported by Config.validate(); nothing to warn here.
+    }
   }
 
   /** Set the logger used for API request/response logging. */
@@ -62,6 +190,10 @@ export class Telebirr {
    * - Body: `{ "appSecret": "{appSecret}" }`
    * - Response: `{ "token": "Bearer xxx", "effectiveDate": "...", "expirationDate": "..." }`
    *
+   * Always performs a network call. The high-level helpers
+   * ({@link createCheckoutUrl}, {@link getOrderStatus}) reuse a cached token
+   * until its expiry instead — see {@link TelebirrOptions.cacheFabricToken}.
+   *
    * @throws ApiError on API errors or invalid responses.
    */
   async applyFabricToken(): Promise<TelebirrApiResponse & { token: string }> {
@@ -76,7 +208,45 @@ export class Telebirr {
       });
     }
 
+    const token = result['token'] as string;
+
+    if (this.options.cacheFabricToken !== false) {
+      const expiryMs = Telebirr.parseExpiryMs(result['expirationDate']);
+      this.tokenCache = {
+        token,
+        expiresAtMs: expiryMs !== null ? expiryMs - TOKEN_EXPIRY_SAFETY_MARGIN_MS : Date.now() + TOKEN_FALLBACK_TTL_MS,
+      };
+    }
+
     return result as TelebirrApiResponse & { token: string };
+  }
+
+  /** Cached fabric token when still valid; otherwise fetch (and cache) a fresh one. */
+  private async getFabricToken(): Promise<string> {
+    if (this.options.cacheFabricToken !== false && this.tokenCache && Date.now() < this.tokenCache.expiresAtMs) {
+      return this.tokenCache.token;
+    }
+    const tokenInfo = await this.applyFabricToken();
+    return tokenInfo.token;
+  }
+
+  /** Parse Telebirr's `expirationDate` (epoch seconds/millis, numeric string, or date string) to epoch ms. */
+  private static parseExpiryMs(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return value < 1e12 ? value * 1000 : value;
+    }
+    if (typeof value === 'string' && value.trim() !== '') {
+      const trimmed = value.trim();
+      if (/^\d+$/.test(trimmed)) {
+        const numeric = Number(trimmed);
+        return numeric < 1e12 ? numeric * 1000 : numeric;
+      }
+      const parsed = Date.parse(trimmed);
+      if (!Number.isNaN(parsed)) {
+        return parsed;
+      }
+    }
+    return null;
   }
 
   /**
@@ -93,7 +263,7 @@ export class Telebirr {
    * @throws ApiError on API errors, invalid responses, or a missing `prepay_id`.
    * @throws InvalidParameterError on parameter validation failures.
    */
-  async createOrder(fabricToken: string, title: string, amount: string | number, merchOrderId?: string | null): Promise<TelebirrApiResponse> {
+  async createOrder(fabricToken: string, title: string, amount: string | number, merchOrderId?: string | null): Promise<CreateOrderResponse> {
     const validated = this.validateOrderParams('createOrder', title, amount, merchOrderId);
 
     const reqObject = this.buildPreOrderRequest(validated.title, validated.amount, validated.merchOrderId, 'Checkout');
@@ -109,7 +279,7 @@ export class Telebirr {
       });
     }
 
-    return result;
+    return result as CreateOrderResponse;
   }
 
   /**
@@ -186,7 +356,7 @@ export class Telebirr {
    * @param merchOrderId Optional: merchant order id (at least one of the two must be provided).
    * @throws InvalidParameterError if neither id is provided, or on validation failure.
    */
-  async queryOrder(fabricToken: string, prepayId?: string | null, merchOrderId?: string | null): Promise<TelebirrApiResponse> {
+  async queryOrder(fabricToken: string, prepayId?: string | null, merchOrderId?: string | null): Promise<QueryOrderResponse> {
     if (!prepayId && !merchOrderId) {
       throw new InvalidParameterError('prepayId|merchOrderId', null, 'Either prepayId or merchOrderId must be provided');
     }
@@ -300,19 +470,75 @@ export class Telebirr {
     // report back the EXACT value Telebirr will use.
     const resolvedMerchOrderId = ParameterValidator.validateMerchantOrderId(merchOrderId ?? null, false);
 
-    const tokenInfo = await this.applyFabricToken();
-    const fabricToken = tokenInfo['token'];
-    if (!fabricToken) {
-      const errorMsg = `Fabric token missing in token response: ${JSON.stringify(tokenInfo)}`;
-      this.logger.error(errorMsg);
-      throw new ApiError(errorMsg, { httpStatus: 200, responseBody: JSON.stringify(tokenInfo) });
-    }
-
+    const fabricToken = await this.getFabricToken();
     const order = await this.createOrder(fabricToken, title, amount, resolvedMerchOrderId);
-    const prepayId = (order['biz_content'] as Record<string, unknown>)['prepay_id'] as string;
-    const checkoutUrl = this.buildCheckoutUrl(prepayId);
+    const checkoutUrl = this.buildCheckoutUrl(order.biz_content.prepay_id);
 
-    return new CheckoutResult(checkoutUrl, resolvedMerchOrderId, prepayId);
+    return new CheckoutResult(checkoutUrl, resolvedMerchOrderId, order.biz_content.prepay_id);
+  }
+
+  /**
+   * High-level helper: confirm an order's real status server-to-server.
+   * Symmetric counterpart to {@link createCheckoutUrl} — token management
+   * (with caching) and response mapping are handled for you.
+   *
+   * This is what your notify endpoint AND your return-URL handler should call
+   * before granting anything: never trust the spoofable browser redirect, and
+   * verify `amount` against your own order before fulfilling.
+   *
+   * @param merchOrderId Your merchant order id (the one from {@link CheckoutResult.merchOrderId}).
+   * @param prepayId Optional alternative lookup key; at least one of the two is required.
+   * @throws ApiError on API errors; InvalidParameterError if neither id is provided.
+   */
+  async getOrderStatus(merchOrderId?: string | null, prepayId?: string | null): Promise<OrderStatus> {
+    const fabricToken = await this.getFabricToken();
+    const result = await this.queryOrder(fabricToken, prepayId ?? null, merchOrderId ?? null);
+
+    const biz: Record<string, unknown> = result.biz_content ?? {};
+    const str = (value: unknown): string => (typeof value === 'string' ? value : value !== undefined && value !== null ? String(value) : '');
+    // Defensive casing fallbacks: the gateway documents snake_case but has
+    // been observed returning camelCase variants on some deployments.
+    const pick = (...keys: string[]): string => {
+      for (const key of keys) {
+        const value = biz[key];
+        if (value !== undefined && value !== null && value !== '') {
+          return str(value);
+        }
+      }
+      return '';
+    };
+
+    const tradeStatus = pick('trade_status', 'tradeStatus');
+    const paymentOrderId = pick('payment_order_id', 'paymentOrderId');
+    const transEndTime = pick('trans_end_time', 'transEndTime');
+
+    return {
+      paid: tradeStatus !== '' && PaymentStatus.isSuccess(tradeStatus),
+      failed: tradeStatus !== '' && PaymentStatus.isFailure(tradeStatus),
+      cancelled: tradeStatus !== '' && PaymentStatus.isCancelled(tradeStatus),
+      tradeStatus,
+      amount: pick('total_amount', 'totalAmount'),
+      currency: pick('trans_currency', 'transCurrency') || 'ETB',
+      paymentOrderId: paymentOrderId !== '' ? paymentOrderId : null,
+      merchOrderId: pick('merch_order_id', 'merchOrderId') || (merchOrderId ?? ''),
+      transEndTime: transEndTime !== '' ? transEndTime : null,
+      raw: result,
+    };
+  }
+
+  /**
+   * Probe gateway availability by requesting a fabric token (the cheapest
+   * authenticated call). Useful before a user-facing checkout, given how
+   * flaky the sandbox can be. Never throws.
+   */
+  async ping(): Promise<{ ok: boolean; latencyMs: number; error: string | null }> {
+    const start = Date.now();
+    try {
+      await this.applyFabricToken();
+      return { ok: true, latencyMs: Date.now() - start, error: null };
+    } catch (e) {
+      return { ok: false, latencyMs: Date.now() - start, error: e instanceof Error ? e.message : String(e) };
+    }
   }
 
   /** Generate a valid merchant order id (alphanumeric, matches Telebirr's charset). */
@@ -434,11 +660,45 @@ export class Telebirr {
   }
 
   /**
-   * Shared request pipeline: signing is already applied to `reqObject` by the
+   * Shared request pipeline with opt-in retry: transient failures (see
+   * {@link ApiError.isTransient}) are retried with exponential backoff when
+   * `options.retry.retries > 0`; everything else fails immediately.
+   */
+  private async sendApiRequest(
+    operation: string,
+    url: string,
+    reqObject: Record<string, unknown>,
+    fabricToken?: string | null,
+    checkApiCode = true
+  ): Promise<TelebirrApiResponse> {
+    const retries = Math.max(0, this.options.retry?.retries ?? 0);
+    const baseDelayMs = this.options.retry?.delayMs ?? 500;
+    const maxDelayMs = this.options.retry?.maxDelayMs ?? 5000;
+
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.sendApiRequestOnce(operation, url, reqObject, fabricToken, checkApiCode);
+      } catch (e) {
+        if (attempt < retries && e instanceof ApiError && e.isTransient()) {
+          const delayMs = Math.min(baseDelayMs * 2 ** attempt, maxDelayMs);
+          this.logger.warn(`Transient ${operation} failure (attempt ${attempt + 1}/${retries + 1}), retrying in ${delayMs}ms`, {
+            telebirr_code: e.telebirrCode,
+            http_status: e.httpStatus,
+          });
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          continue;
+        }
+        throw e;
+      }
+    }
+  }
+
+  /**
+   * One request attempt: signing is already applied to `reqObject` by the
    * caller's builder. Handles transport, HTTP status, JSON decoding, and
    * API-level error detection.
    */
-  private async sendApiRequest(
+  private async sendApiRequestOnce(
     operation: string,
     url: string,
     reqObject: Record<string, unknown>,
@@ -470,6 +730,10 @@ export class Telebirr {
     this.logResponse(operation, httpCode, responseBody);
 
     if (httpCode < 200 || httpCode >= 300) {
+      if (httpCode === 401) {
+        // Token was rejected — drop the cache so the next call fetches fresh.
+        this.tokenCache = null;
+      }
       const errorMsg = this.formatApiError(operation, httpCode, responseBody);
       this.logger.error(errorMsg, { http_code: httpCode });
       throw new ApiError(errorMsg, { httpStatus: httpCode, responseBody });

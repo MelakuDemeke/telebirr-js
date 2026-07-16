@@ -1,4 +1,5 @@
 import { ConfigurationError } from './errors/ConfigurationError.js';
+import { KeyNormalizer } from './KeyNormalizer.js';
 import { ParameterValidator } from './ParameterValidator.js';
 
 export type TelebirrEnvironment = 'test' | 'production';
@@ -77,15 +78,19 @@ export class Config {
     this.appSecret = options.appSecret;
     this.merchantAppId = options.merchantAppId;
     this.merchantCode = options.merchantCode;
-    this.privateKey = options.privateKey;
+    // Ethio Telecom issues keys as bare base64 DER; accept that (or PEM,
+    // including PEM with literal `\n` from env files) and normalize to PEM.
+    this.privateKey = options.privateKey ? KeyNormalizer.normalizePrivateKey(options.privateKey) : options.privateKey;
 
     if (!options.notifyUrl) {
-      throw new TypeError('notifyUrl is required. This is where Telebirr will send payment status updates.');
+      throw new TypeError(
+        'notifyUrl is required. This is where Telebirr will send payment status updates. (Pass it in options, or set TELEBIRR_NOTIFY_URL when using Config.fromEnvironment.)'
+      );
     }
     this.notifyUrl = options.notifyUrl;
 
     this.redirectUrl = options.redirectUrl ?? null;
-    this.telebirrPublicKey = options.telebirrPublicKey ?? null;
+    this.telebirrPublicKey = options.telebirrPublicKey ? KeyNormalizer.normalizePublicKey(options.telebirrPublicKey) : null;
 
     this.verifySsl = options.verifySsl ?? true;
     this.caBundlePath = options.caBundlePath ?? null;
@@ -117,12 +122,30 @@ export class Config {
   }
 
   /**
-   * Create a config with the environment auto-detected from
-   * `TELEBIRR_ENVIRONMENT`, then `NODE_ENV`/`APP_ENV`, defaulting to `'test'`.
+   * Create a config from environment variables, with any explicit option
+   * overriding its env var. Enables zero-argument setup:
+   *
+   * - `TELEBIRR_ENVIRONMENT` (then `APP_ENV`/`NODE_ENV`, default `'test'`)
+   * - `TELEBIRR_FABRIC_APP_ID`, `TELEBIRR_APP_SECRET`
+   * - `TELEBIRR_MERCHANT_APP_ID`, `TELEBIRR_MERCHANT_CODE`
+   * - `TELEBIRR_PRIVATE_KEY` (PEM or bare base64 — both accepted)
+   * - `TELEBIRR_NOTIFY_URL`, `TELEBIRR_REDIRECT_URL`, `TELEBIRR_PUBLIC_KEY`
    */
-  static fromEnvironment(options: Omit<ConfigOptions, 'environment'> & { environment?: string }): Config {
-    const environment = options.environment ?? process.env.TELEBIRR_ENVIRONMENT ?? process.env.APP_ENV ?? process.env.NODE_ENV ?? 'test';
-    return new Config({ ...options, environment });
+  static fromEnvironment(options: Partial<ConfigOptions> = {}): Config {
+    const env = process.env;
+    const environment = options.environment ?? env.TELEBIRR_ENVIRONMENT ?? env.APP_ENV ?? env.NODE_ENV ?? 'test';
+    return new Config({
+      ...options,
+      environment,
+      fabricAppId: options.fabricAppId ?? env.TELEBIRR_FABRIC_APP_ID ?? '',
+      appSecret: options.appSecret ?? env.TELEBIRR_APP_SECRET ?? '',
+      merchantAppId: options.merchantAppId ?? env.TELEBIRR_MERCHANT_APP_ID ?? '',
+      merchantCode: options.merchantCode ?? env.TELEBIRR_MERCHANT_CODE ?? '',
+      privateKey: options.privateKey ?? env.TELEBIRR_PRIVATE_KEY ?? '',
+      notifyUrl: options.notifyUrl ?? env.TELEBIRR_NOTIFY_URL ?? '',
+      redirectUrl: options.redirectUrl ?? env.TELEBIRR_REDIRECT_URL ?? null,
+      telebirrPublicKey: options.telebirrPublicKey ?? env.TELEBIRR_PUBLIC_KEY ?? null,
+    });
   }
 
   /** `'test'`, `'production'`, or `'unknown'` if the base URL doesn't match either known gateway. */
@@ -160,11 +183,13 @@ export class Config {
     if (!this.notifyUrl) errors.push('notifyUrl is required');
 
     if (this.privateKey) {
-      if (!this.privateKey.includes('-----BEGIN PRIVATE KEY-----')) {
-        errors.push("privateKey must be in PEM format (should start with '-----BEGIN PRIVATE KEY-----')");
-      }
-      if (!this.privateKey.includes('-----END PRIVATE KEY-----')) {
-        errors.push("privateKey must be in PEM format (should end with '-----END PRIVATE KEY-----')");
+      const hasPkcs8 = this.privateKey.includes('-----BEGIN PRIVATE KEY-----') && this.privateKey.includes('-----END PRIVATE KEY-----');
+      const hasPkcs1 = this.privateKey.includes('-----BEGIN RSA PRIVATE KEY-----') && this.privateKey.includes('-----END RSA PRIVATE KEY-----');
+      if (!hasPkcs8 && !hasPkcs1) {
+        errors.push(
+          "privateKey must be in PEM format ('-----BEGIN PRIVATE KEY-----' or '-----BEGIN RSA PRIVATE KEY-----') " +
+            'or bare base64 DER as issued by Ethio Telecom (which is normalized automatically)'
+        );
       }
     }
 
