@@ -1,6 +1,6 @@
 {
   "name": "@melakudemeke/telebirr-js",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "Modern TypeScript/Node.js library for Telebirr Web Checkout (H5 C2B) payments.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -20,7 +20,7 @@
   ],
   "sideEffects": false,
   "engines": {
-    "node": ">=18"
+    "node": ">=18.17"
   },
   "scripts": {
     "build": "tsup",
@@ -57,7 +57,7 @@
   },
   "homepage": "https://github.com/MelakuDemeke/telebirr-js#readme",
   "dependencies": {
-    "undici": "^7.28.0"
+    "undici": "^6.28.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

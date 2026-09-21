@@ -3,6 +3,16 @@
 All notable changes to `@melakudemeke/telebirr-js` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [SemVer](https://semver.org/).
 
+## [3.2.1] — 2026-09-21
+
+### Fixed
+- **The package works on Node 18 again.** `undici` 7 requires Node >= 20.18.1 and
+  throws `ReferenceError: File is not defined` on import under Node 18, so 3.1.0
+  and 3.2.0 could not be loaded at all on a runtime `engines` claimed to support.
+  The dependency is now `undici@^6.28.1` (Node >= 18.17), which provides the same
+  `Agent`/`request` API this library uses. `engines` is tightened to `>=18.17`
+  to match. No API changes.
+
 ## [3.2.0] — 2026-09-21
 
 Brings the library level with telebirr-php 2.3.0 and 2.4.0: the notify leg and
