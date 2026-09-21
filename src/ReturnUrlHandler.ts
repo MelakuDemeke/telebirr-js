@@ -1,19 +1,19 @@
 import type { Config } from './Config.js';
 import { TelebirrError } from './errors/TelebirrError.js';
+import { NotificationHandler } from './NotificationHandler.js';
+import type { NotificationPaymentData } from './NotificationHandler.js';
 import { PaymentStatus } from './PaymentStatus.js';
 import { SignatureVerifier } from './SignatureVerifier.js';
 
-export interface ReturnUrlPaymentData {
-  tradeStatus: string;
-  paymentOrderId: string;
-  merchantOrderId: string;
-  amount: string;
-  currency: string;
-  isSuccess: boolean;
-  timestamp: string;
-  /** All original parameters, unmodified. */
-  raw: Record<string, unknown>;
-}
+/**
+ * Verified return-URL payment data — the same shape as
+ * {@link NotificationHandler.handle}'s result, so settlement code does not
+ * have to care which leg delivered the payment. Fields the return leg does
+ * not carry (notably `transId`) come back as empty strings, and
+ * `timestampUnix` / `notifyTimeUnix` are null because this leg sends
+ * `Y-m-d H:i:s` strings rather than epochs.
+ */
+export type ReturnUrlPaymentData = NotificationPaymentData;
 
 /**
  * Helper for handling Telebirr return-URL parameters: verifies signatures
@@ -47,17 +47,13 @@ export class ReturnUrlHandler {
       throw new TelebirrError('Invalid signature - payment data may be tampered with');
     }
 
-    const str = (value: unknown): string => (typeof value === 'string' ? value : value !== undefined && value !== null ? String(value) : '');
-
+    // Same shape as NotificationHandler.extractPaymentInfo(). The return leg
+    // simply leaves absent fields empty -- it carries no transaction id at
+    // all, which is why it was the one leg unaffected by Telebirr's
+    // transId/trans_id signing mismatch.
     return {
-      tradeStatus: str(params['trade_status']),
-      paymentOrderId: str(params['payment_order_id']),
-      merchantOrderId: str(params['merch_order_id']),
-      amount: str(params['total_amount']),
-      currency: typeof params['trans_currency'] === 'string' ? (params['trans_currency'] as string) : 'ETB',
+      ...NotificationHandler.extractPaymentInfo(params),
       isSuccess: ReturnUrlHandler.isPaymentSuccessful(params),
-      timestamp: str(params['trans_end_time']),
-      raw: params,
     };
   }
 

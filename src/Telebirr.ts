@@ -33,6 +33,8 @@ export type CreateOrderResponse = TelebirrApiResponse & { biz_content: CreateOrd
  * is optional because the gateway omits fields depending on order state.
  */
 export interface QueryOrderBizContent extends Record<string, unknown> {
+  /** What queryOrder actually returns — see {@link Telebirr.getOrderStatus}. */
+  order_status?: string;
   trade_status?: string;
   merch_order_id?: string;
   prepay_id?: string;
@@ -40,6 +42,10 @@ export interface QueryOrderBizContent extends Record<string, unknown> {
   total_amount?: string;
   trans_currency?: string;
   trans_end_time?: string;
+  /** What queryOrder actually returns in place of `trans_end_time`. */
+  trans_time?: string;
+  /** Telebirr's short transaction id (the notify leg sends it as `transId`). */
+  trans_id?: string;
 }
 
 /** Response of {@link Telebirr.queryOrder} with its `biz_content` typed. */
@@ -56,7 +62,7 @@ export interface OrderStatus {
   failed: boolean;
   /** True when Telebirr reports the payment was cancelled. */
   cancelled: boolean;
-  /** Raw `trade_status` string (e.g. `'PAY_SUCCESS'`). */
+  /** Raw status string (e.g. `'PAY_SUCCESS'`), from `order_status` or `trade_status`. */
   tradeStatus: string;
   /** Total amount as reported by Telebirr — verify it against YOUR order amount before granting. */
   amount: string;
@@ -66,6 +72,12 @@ export interface OrderStatus {
   merchOrderId: string;
   /** Transaction end time as reported by Telebirr, when available. */
   transEndTime: string | null;
+  /**
+   * Telebirr's short transaction id — the reference printed on the customer's
+   * SMS receipt, and the one they quote in a support call. Empty string when
+   * the gateway did not supply one, which is normal for an unpaid order.
+   */
+  transId: string;
   /** The full queryOrder response, for anything not covered above. */
   raw: QueryOrderResponse;
 }
@@ -508,9 +520,15 @@ export class Telebirr {
       return '';
     };
 
-    const tradeStatus = pick('trade_status', 'tradeStatus');
+    // The three legs do not share a vocabulary. queryOrder answers with
+    // `order_status` where the notify sends `trade_status: Completed` and the
+    // return sends `trade_status: PAY_SUCCESS`. Reading only `trade_status`
+    // left tradeStatus empty for a genuinely paid order, so `paid` came back
+    // false with no error to notice.
+    const tradeStatus = pick('trade_status', 'tradeStatus', 'order_status', 'orderStatus');
     const paymentOrderId = pick('payment_order_id', 'paymentOrderId');
-    const transEndTime = pick('trans_end_time', 'transEndTime');
+    // queryOrder calls the timestamp `trans_time`, not `trans_end_time`.
+    const transEndTime = pick('trans_end_time', 'transEndTime', 'trans_time', 'transTime');
 
     return {
       paid: tradeStatus !== '' && PaymentStatus.isSuccess(tradeStatus),
@@ -522,6 +540,8 @@ export class Telebirr {
       paymentOrderId: paymentOrderId !== '' ? paymentOrderId : null,
       merchOrderId: pick('merch_order_id', 'merchOrderId') || (merchOrderId ?? ''),
       transEndTime: transEndTime !== '' ? transEndTime : null,
+      // queryOrder spells it `trans_id`; the notify leg sends the same value as `transId`.
+      transId: pick('trans_id', 'transId'),
       raw: result,
     };
   }

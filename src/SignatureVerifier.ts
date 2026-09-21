@@ -6,6 +6,36 @@ import { Signer } from './Signer.js';
 const MIN_PLAUSIBLE_SIGNATURE_LENGTH = 200;
 
 /**
+ * Fields Telebirr signs under one name and transmits under another, keyed by
+ * the name on the wire and valued by the name that went into the hash.
+ *
+ * Telebirr's integration guide names the transaction id `trans_id`; the JSON
+ * their gateway actually POSTs calls it `transId`. They sign the former and
+ * send the latter, so a canonical string built from the keys as received can
+ * never match theirs, and every notification carrying that field is refused.
+ * The rename breaks verification twice over — `transId` sorts *before*
+ * `trans_currency` (`I` is 0x49, `_` is 0x5F) while `trans_id` sorts *after*
+ * `trans_end_time` — so no reordering of the received keys can rescue it.
+ *
+ * Confirmed against a live production notification (2026-08-21) that failed
+ * every subset and ordering of its received keys and verified on the first
+ * attempt once renamed. The return leg carries no transaction id, which is
+ * why only the notify leg ever broke.
+ */
+const SIGNED_FIELD_ALIASES: Readonly<Record<string, string>> = {
+  transId: 'trans_id',
+};
+
+/** `decodeURIComponent` that returns the input unchanged instead of throwing on a malformed `%` sequence. */
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
  * Verifies signatures from Telebirr's return URLs and server-to-server
  * notifications.
  *
@@ -44,19 +74,9 @@ export class SignatureVerifier {
       );
     }
 
-    const canonicalString = Signer.buildCanonicalString(params);
-    const normalizedSignature = SignatureVerifier.normalizeSignature(signature);
-
-    if (SignatureVerifier.verifySignature(canonicalString, normalizedSignature, publicKey)) {
-      return true;
-    }
-
-    const urlDecoded = decodeURIComponent(signature);
-    if (urlDecoded !== normalizedSignature && SignatureVerifier.verifySignature(canonicalString, urlDecoded, publicKey)) {
-      return true;
-    }
-
-    return false;
+    // Every canonical string Telebirr might have hashed, against every
+    // reading of the signature bytes.
+    return SignatureVerifier.verifyParams(params, signature, publicKey);
   }
 
   /**
@@ -74,8 +94,7 @@ export class SignatureVerifier {
       return false;
     }
 
-    const canonicalString = Signer.buildCanonicalString(params);
-    return SignatureVerifier.verifySignature(canonicalString, params['sign'], publicKey);
+    return SignatureVerifier.verifyParams(params, params['sign'], publicKey);
   }
 
   /** The canonical string that would be signed/verified for `params` — exposed for debugging. */
@@ -95,12 +114,15 @@ export class SignatureVerifier {
   /**
    * Normalize a signature that may have passed through query-string decoding,
    * where a literal `+` in base64 becomes a space.
+   *
+   * The base64 alphabet contains no space, so a space is always a `+` that URL
+   * decoding ate — Telebirr sends the raw `+` unencoded in the return URL's
+   * query string. Spaces are replaced unconditionally, including in a
+   * partially encoded signature that carries both a literal `+` (from `%2B`)
+   * and a mangled space.
    */
   static normalizeSignature(signature: string): string {
-    if (signature.includes(' ') && !signature.includes('+')) {
-      return signature.replace(/ /g, '+');
-    }
-    return signature;
+    return signature.replace(/ /g, '+');
   }
 
   /**
@@ -140,46 +162,92 @@ export class SignatureVerifier {
     return null;
   }
 
-  private static verifySignature(data: string, signature: string, publicKeyPem: string): boolean {
-    const decoded = SignatureVerifier.decodeSignature(signature);
-    if (!decoded) {
-      return false;
-    }
-
-    try {
-      return cryptoVerify(
-        'sha256',
-        Buffer.from(data, 'utf8'),
-        {
-          key: publicKeyPem,
-          padding: cryptoConstants.RSA_PKCS1_PSS_PADDING,
-          saltLength: 32,
-        },
-        decoded
-      );
-    } catch {
-      return false;
-    }
+  /** Verify one parameter set against every canonical string Telebirr might have signed. */
+  private static verifyParams(params: Record<string, unknown>, signature: string, publicKeyPem: string): boolean {
+    return SignatureVerifier.canonicalStringVariants(params).some((canonicalString) =>
+      SignatureVerifier.verifySignature(canonicalString, signature, publicKeyPem)
+    );
   }
 
-  /** Try a handful of base64 decoding strategies to cope with URL-transport mangling. */
-  private static decodeSignature(signature: string): Buffer | null {
-    const candidates = [signature, signature.replace(/ /g, '+'), decodeURIComponent(signature).replace(/ /g, '+'), decodeURIComponent(signature)];
+  /**
+   * The canonical strings Telebirr might have hashed for this payload.
+   *
+   * The payload exactly as received comes first, so a gateway that names its
+   * fields consistently keeps working unchanged. Only then is the aliased form
+   * tried. This widens which *string* is hashed, never *who* may have signed
+   * it — every variant is checked against the same public key, so forging any
+   * of them still requires Telebirr's private key.
+   */
+  private static canonicalStringVariants(params: Record<string, unknown>): string[] {
+    const variants = [Signer.buildCanonicalString(params)];
 
-    for (const candidate of candidates) {
-      const withPadding = candidate + '='.repeat((4 - (candidate.length % 4)) % 4);
-      if (/^[A-Za-z0-9+/]+={0,2}$/.test(withPadding)) {
-        try {
-          const buf = Buffer.from(withPadding, 'base64');
-          if (buf.length > 0) {
-            return buf;
-          }
-        } catch {
-          // try next candidate
-        }
+    const aliased: Record<string, unknown> = { ...params };
+    let renamed = false;
+
+    for (const [sentAs, signedAs] of Object.entries(SIGNED_FIELD_ALIASES)) {
+      if (sentAs in aliased && !(signedAs in aliased)) {
+        aliased[signedAs] = aliased[sentAs];
+        delete aliased[sentAs];
+        renamed = true;
       }
     }
 
-    return null;
+    if (renamed) {
+      variants.push(Signer.buildCanonicalString(aliased));
+    }
+
+    return variants;
+  }
+
+  private static verifySignature(data: string, signature: string, publicKeyPem: string): boolean {
+    const payload = Buffer.from(data, 'utf8');
+
+    // Every reading is checked against the same key, so trying several widens
+    // which bytes we are willing to call the signature, never who is allowed
+    // to have produced them.
+    return SignatureVerifier.decodeSignatureCandidates(signature).some((candidate) => {
+      try {
+        return cryptoVerify(
+          'sha256',
+          payload,
+          {
+            key: publicKeyPem,
+            padding: cryptoConstants.RSA_PKCS1_PSS_PADDING,
+            saltLength: 32,
+          },
+          candidate
+        );
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /**
+   * Every plausible reading of a base64 signature, as raw bytes, most likely
+   * first. All distinct readings are returned rather than the first that
+   * decodes, so a reading that parses but yields the wrong bytes can never
+   * shadow the correct one.
+   */
+  private static decodeSignatureCandidates(signature: string): Buffer[] {
+    const urlDecoded = safeDecodeURIComponent(signature);
+    const attempts = [signature.replace(/ /g, '+'), signature, urlDecoded.replace(/ /g, '+'), urlDecoded];
+
+    const decoded: Buffer[] = [];
+
+    for (const attempt of attempts) {
+      // Padding is sometimes lost in transit; restore it.
+      const withPadding = attempt + '='.repeat((4 - (attempt.length % 4)) % 4);
+      if (!/^[A-Za-z0-9+/]+={0,2}$/.test(withPadding)) {
+        continue;
+      }
+
+      const buf = Buffer.from(withPadding, 'base64');
+      if (buf.length > 0 && !decoded.some((existing) => existing.equals(buf))) {
+        decoded.push(buf);
+      }
+    }
+
+    return decoded;
   }
 }

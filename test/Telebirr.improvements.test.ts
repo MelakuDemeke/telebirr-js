@@ -230,6 +230,50 @@ describe('Telebirr.getOrderStatus', () => {
     const status = await client.getOrderStatus('ORDER123');
     expect(status.paid).toBe(false);
   });
+
+  // queryOrder speaks its own dialect: `order_status`, not `trade_status`, and
+  // `trans_time`, not `trans_end_time`. Body shape copied from a real
+  // production response (2026-08-21).
+  it('reads the queryOrder dialect: order_status, trans_time, trans_id', async () => {
+    const http = new FakeHttpClient([
+      tokenResponse(),
+      new HttpResponse(
+        200,
+        JSON.stringify({
+          code: '00000',
+          biz_content: {
+            merch_order_id: 'AFROTESTF62S9L5EJBDUAR',
+            order_status: 'PAY_SUCCESS',
+            payment_order_id: '108N11088L17102600001002',
+            trans_time: '2026-08-21 17:10:27',
+            trans_currency: 'ETB',
+            total_amount: '1.00',
+            trans_id: 'DHL91SAMXZ',
+          },
+        })
+      ),
+    ]);
+    const client = new Telebirr(makeConfig(), null, http);
+
+    const status = await client.getOrderStatus('AFROTESTF62S9L5EJBDUAR');
+    expect(status.paid).toBe(true);
+    expect(status.tradeStatus).toBe('PAY_SUCCESS');
+    expect(status.transEndTime).toBe('2026-08-21 17:10:27');
+    expect(status.transId).toBe('DHL91SAMXZ');
+    expect(status.paymentOrderId).toBe('108N11088L17102600001002');
+  });
+
+  it('fails closed on an unpaid order_status and reports an empty transId', async () => {
+    const http = new FakeHttpClient([
+      tokenResponse(),
+      new HttpResponse(200, JSON.stringify({ code: '00000', biz_content: { merch_order_id: 'ORDER123', order_status: 'WAIT_PAY', trans_id: '' } })),
+    ]);
+    const client = new Telebirr(makeConfig(), null, http);
+
+    const status = await client.getOrderStatus('ORDER123');
+    expect(status.paid).toBe(false);
+    expect(status.transId).toBe('');
+  });
 });
 
 describe('Telebirr.ping', () => {

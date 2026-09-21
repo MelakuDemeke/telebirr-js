@@ -170,6 +170,7 @@ status.tradeStatus;    // e.g. 'PAY_SUCCESS'
 status.amount;         // e.g. '100.00' — VERIFY this against your own order amount
 status.currency;       // 'ETB'
 status.paymentOrderId; // Telebirr's transaction reference (or null)
+status.transId;        // short transaction id from the customer's SMS receipt ('' if unpaid)
 status.raw;            // the full queryOrder response if you need more
 ```
 
@@ -224,30 +225,73 @@ the table is here for when you're debugging the raw redirect.
 
 ### Handle Payment Notifications
 
+`NotificationHandler.handle()` is the recommended entry point — it parses,
+unwraps, verifies and extracts in one call, and **fails closed** by throwing on a
+missing or invalid signature.
+
 ```ts
-import { NotificationHandler } from '@melakudemeke/telebirr-js';
+import { NotificationHandler, TelebirrError } from '@melakudemeke/telebirr-js';
 
-app.post('/telebirr/notify', express.text({ type: '*/*' }), (req, res) => {
-  const notification = NotificationHandler.parse(req.body);
-
-  if (!NotificationHandler.verify(notification, config)) {
-    // respond* return a NotificationResponse (framework-agnostic — no
-    // implicit header()/echo). `.send(res)` works with Express/Node's
-    // http.ServerResponse; use `.toWebResponse()` for Next.js/Remix/etc.
-    NotificationHandler.respondError('Invalid signature').send(res);
-    return;
+app.post('/telebirr/notify', express.text({ type: '*/*' }), async (req, res) => {
+  let payment;
+  try {
+    payment = NotificationHandler.handle(req.body, config);
+  } catch (err) {
+    if (err instanceof TelebirrError || err instanceof SyntaxError) {
+      // respond* return a NotificationResponse (framework-agnostic — no
+      // implicit header()/echo). `.send(res)` works with Express/Node's
+      // http.ServerResponse; use `.toWebResponse()` for Next.js/Remix/etc.
+      NotificationHandler.respondError('Invalid signature', 401).send(res);
+      return;
+    }
+    throw err;
   }
 
-  if (NotificationHandler.isPaymentSuccessful(notification)) {
-    const paymentInfo = NotificationHandler.extractPaymentInfo(notification);
-    // Update database, fulfill order, etc.
-    NotificationHandler.respondSuccess('Payment processed').send(res);
-    return;
+  if (payment.isSuccess) {
+    // Confirm server-to-server before fulfilling — see the settlement pattern below.
+    const status = await client.getOrderStatus(payment.merchantOrderId);
+    if (status.paid && status.amount === expectedAmountFor(payment.merchantOrderId)) {
+      // Update database, fulfill order, etc. — idempotently.
+    }
   }
 
-  NotificationHandler.respondSuccess().send(res);
+  NotificationHandler.respondSuccess('Payment processed').send(res);
 });
 ```
+
+The lower-level `parse()` / `verify()` / `isPaymentSuccessful()` /
+`extractPaymentInfo()` calls remain available if you need the steps separately.
+
+#### Notify parameters (the raw contract)
+
+Telebirr POSTs a JSON body to your `notifyUrl`. **It does not use the same
+conventions as the return URL** — the differences below are handled for you, but
+they are the reason a hand-rolled notify handler tends to fail silently.
+
+| Parameter | Meaning |
+|---|---|
+| `merch_order_id` | Your merchant order id, echoed back verbatim |
+| `payment_order_id` | Telebirr's transaction reference |
+| `transId` | Short transaction id — the one on the customer's SMS receipt |
+| `trade_status` | **`Completed`** — *not* `PAY_SUCCESS` as on the return leg |
+| `total_amount` | Order amount |
+| `trans_currency` | Currency (`ETB`) |
+| `trans_end_time`, `notify_time` | Epoch **milliseconds** — the return URL sends `Y-m-d H:i:s` strings instead |
+| `merch_code`, `appid`, `notify_url` | Echoed back; part of the signed payload, so they must be kept when verifying |
+| `sign`, `sign_type` | RSA-PSS signature over the other params |
+
+Three consequences, all handled by `handle()`:
+
+- **`Completed` is the success word on this leg.** `PaymentStatus.isSuccess()`
+  accepts it. A handler that only checks `PAY_SUCCESS` will verify a genuine
+  payment and then silently skip fulfillment — no error, no log line.
+- **The body is sometimes wrapped in a `data` envelope.** `parse()` unwraps it.
+  Left wrapped, both the order id and the signature are invisible, so the
+  callback reads as unsigned *and* unmatched.
+- **Timestamps are milliseconds.** `extractPaymentInfo()` returns the raw values
+  under `timestamp` / `notifyTime` and normalized Unix seconds under
+  `timestampUnix` / `notifyTimeUnix` (`null` for the return leg's formatted
+  strings, which carry no timezone worth guessing at).
 
 > **Next.js / Remix:** use
 > `NotificationHandler.respondSuccess(...).toWebResponse()` to get a standard
@@ -267,6 +311,49 @@ app.post('/telebirr/notify', express.text({ type: '*/*' }), (req, res) => {
 - Your `notifyUrl` must be publicly reachable — `localhost` or a private
   address will never receive anything (the library warns about this at
   construction time). In development use a tunnel (ngrok, cloudflared).
+
+#### The three legs do not share a vocabulary
+
+Telebirr describes the same payment differently depending on which leg reports
+it. The library normalizes all three, so `isSuccess` / `OrderStatus.paid` and
+the extracted objects mean the same thing everywhere — but the raw differences
+matter when you are reading gateway logs or debugging by hand:
+
+| Concept | notify | return URL | queryOrder |
+|---|---|---|---|
+| status field | `trade_status` | `trade_status` | `order_status` |
+| success value | `Completed` | `PAY_SUCCESS` | `PAY_SUCCESS` |
+| transaction id | `transId` (signed as `trans_id`) | *absent* | `trans_id` |
+| timestamp field | `trans_end_time` | `trans_end_time` | `trans_time` |
+| timestamp format | epoch milliseconds | `Y-m-d H:i:s` | `Y-m-d H:i:s` |
+
+`ReturnUrlHandler.handle()` and `NotificationHandler.handle()` return the same
+keys, so settlement code does not need to know which leg it is holding. Fields a
+given leg does not carry come back as empty strings, and `timestampUnix` /
+`notifyTimeUnix` are `null` when the value is not an epoch rather than being
+guessed at.
+
+#### What the signature check tolerates
+
+Telebirr's own payloads are not internally consistent, and the library absorbs
+two specific discrepancies so you do not have to. Both only widen which string
+or which bytes are accepted as the signed material — every candidate is checked
+against the same public key, so forging one still requires Telebirr's private
+key.
+
+- **`transId` vs `trans_id`.** Telebirr hashes the transaction id under
+  `trans_id` — the name their integration guide uses — but puts `transId` on the
+  wire. A canonical string built from the keys as received therefore never
+  matches theirs, and the notification is refused. Verification tries the payload
+  exactly as received first, then the aliased spelling. Only the notify leg is
+  affected; the return URL carries no transaction id, so it verifies either way.
+- **`+` arriving as a space.** Telebirr sends the raw `+` of a base64 signature
+  unencoded in the return URL, so form decoding turns it into a space. Spaces are
+  repaired, and every distinct decoding of the signature is tried against the key.
+
+If a signature you believe is genuine is still refused, the cause is almost
+always the public key rather than the payload: the key issued for the developer
+portal is not the key a production merchant signs with.
 
 ### The idempotent settlement pattern (recommended)
 

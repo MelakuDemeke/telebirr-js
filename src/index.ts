@@ -3,7 +3,7 @@ export { Config } from './Config.js';
 export type { ConfigOptions, TelebirrEnvironment } from './Config.js';
 export { KeyNormalizer } from './KeyNormalizer.js';
 export { NotificationHandler } from './NotificationHandler.js';
-export type { PaymentInfo } from './NotificationHandler.js';
+export type { PaymentInfo, NotificationPaymentData } from './NotificationHandler.js';
 export { NotificationResponse } from './NotificationResponse.js';
 export type { NodeStyleResponse } from './NotificationResponse.js';
 export { ParameterValidator } from './ParameterValidator.js';

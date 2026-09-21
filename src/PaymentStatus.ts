@@ -1,4 +1,11 @@
-const SUCCESS_STATUSES = new Set(['PAY_SUCCESS', 'SUCCESS', 'PAID']);
+/**
+ * The three channels do not agree on the word for "paid". The return URL and
+ * queryOrder both say `PAY_SUCCESS`; the server-to-server notification says
+ * `Completed`. Missing the latter fails silently: a notification whose
+ * signature verifies and whose payment is genuinely complete reads as
+ * unsuccessful, so fulfillment never runs — no error, no log line.
+ */
+const SUCCESS_STATUSES = new Set(['PAY_SUCCESS', 'SUCCESS', 'PAID', 'COMPLETED']);
 const FAILURE_STATUSES = new Set(['PAY_FAILED', 'FAILED']);
 const CANCELLED_STATUSES = new Set(['PAY_CANCEL', 'CANCEL', 'CANCELLED']);
 

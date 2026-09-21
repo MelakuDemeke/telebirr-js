@@ -3,6 +3,80 @@
 All notable changes to `@melakudemeke/telebirr-js` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [SemVer](https://semver.org/).
 
+## [3.2.0] — 2026-09-21
+
+Brings the library level with telebirr-php 2.3.0 and 2.4.0: the notify leg and
+queryOrder, corrected against live production payloads. Fully backward
+compatible with 3.1.0 — new methods, new fields, and verification that accepts
+strictly more genuine payloads while refusing everything it refused before.
+
+The theme: **a correct integration, a correct key, a genuinely paid payment, and
+the library reporting otherwise with no error to notice.** Telebirr's three legs
+(notify, return URL, queryOrder) do not share a vocabulary, and every difference
+failed silently.
+
+### Fixed
+- **`trade_status: Completed` now reads as a successful payment.** The notify leg
+  reports `Completed` where the return URL and queryOrder report `PAY_SUCCESS`, so
+  `isPaymentSuccessful()` returned `false` for a verified, genuinely paid
+  notification.
+- **`NotificationHandler.parse()` unwraps a `data` envelope.** Left wrapped,
+  `merch_order_id` and `sign` are invisible, so the callback read as unsigned
+  *and* unmatched. Only unwrapped when the inner object carries
+  `merch_order_id`, so a flat body with an unrelated `data` key is untouched.
+- **Telebirr signs the transaction id as `trans_id` and sends it as `transId`.**
+  The canonical string is built from the keys as received, so it could never
+  match the one they hashed, and **every notification carrying a transaction id
+  was refused**. The rename changes both the name and the sort position
+  (`transId` sorts before `trans_currency`; `trans_id` after `trans_end_time`),
+  so no reordering of the received keys rescues it. `SignatureVerifier` now
+  tries the payload exactly as received first, then the aliased spelling.
+- **Every distinct decoding of the signature is tried against the key,** not
+  just the first that parses, so a reading that decodes to the wrong bytes can
+  no longer shadow the correct one.
+- **`normalizeSignature()` now repairs spaces unconditionally.** It previously
+  gave up when the signature also contained a literal `+` — exactly the
+  partially encoded case that needs it. A space is never valid base64.
+- **A malformed `%` sequence in a signature no longer throws** out of
+  `SignatureVerifier.verify()`; it simply fails verification.
+- **`getOrderStatus()` now reads `order_status`.** queryOrder answers with
+  `order_status`, not `trade_status`, so `tradeStatus` came back empty and
+  **`paid` was `false` for a genuinely paid order** — on the leg integrations
+  lean on when a callback is late.
+- **`getOrderStatus()` now reads `trans_time`,** queryOrder's name for the
+  timestamp, so `transEndTime` is no longer always `null` there.
+
+### Added
+- **`NotificationHandler.handle(rawJson, config)`** — parse, unwrap, verify and
+  extract in one call, mirroring `ReturnUrlHandler.handle()`. Fails closed with a
+  `TelebirrError` on a missing or invalid signature. Returns `PaymentInfo` plus
+  `isSuccess` (exported as `NotificationPaymentData`).
+- **`NotificationHandler.unwrap()`** — the envelope logic on its own.
+- **`NotificationHandler.toUnixSeconds()`** — the notify leg sends epoch
+  **milliseconds**, the return URL sends `Y-m-d H:i:s`. Non-numeric values yield
+  `null` rather than a guessed timezone.
+- **`PaymentInfo` gains `transId`, `merchCode`, `appId`, `notifyUrl`,
+  `timestampUnix`, `notifyTimeUnix` and `raw`.** `transId` is the id on the
+  customer's SMS receipt — previously parsed and discarded.
+- **`OrderStatus.transId`** (queryOrder sends `trans_id`; `transId` also accepted).
+- **`ReturnUrlPaymentData` now has the same shape as `NotificationHandler.handle()`'s
+  result**, so settlement code no longer has to care which leg delivered the
+  payment. `transId` is empty on this leg, which carries none.
+
+### The three legs, side by side
+
+| Concept | notify | return URL | queryOrder |
+|---|---|---|---|
+| status field | `trade_status` | `trade_status` | **`order_status`** |
+| success value | `Completed` | `PAY_SUCCESS` | `PAY_SUCCESS` |
+| transaction id | `transId` (signed as `trans_id`) | *absent* | `trans_id` |
+| timestamp field | `trans_end_time` | `trans_end_time` | **`trans_time`** |
+| timestamp format | epoch milliseconds | `Y-m-d H:i:s` | `Y-m-d H:i:s` |
+
+### Notes
+- `verifyFromRawQueryString()` shares the same verification path, so it gets
+  every signature fix too.
+
 ## [3.1.0] — 2026-07-16
 
 Driven by field notes from a real Next.js integration. Fully backward compatible with 3.0.0.
