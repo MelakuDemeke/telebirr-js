@@ -2,7 +2,7 @@
     <img src="img/telebirrlogo.png" alt="Telebirr" title="Aimeos" align="right" height="60" />
 </a>
 
-# Telebirr JS/TS Library (Web Checkout)
+# Telebirr JS/TS Library (Web Checkout & In-App SDK)
 ![](img/telebanner.png)
 
 ![GitHub branch checks state](https://img.shields.io/github/checks-status/MelakuDemeke/telebirr-js/main)
@@ -16,7 +16,7 @@
 ![GitHub commit activity](https://img.shields.io/github/commit-activity/m/MelakuDemeke/telebirr-js?logo=github)
 ![GitHub last commit](https://img.shields.io/github/last-commit/MelakuDemeke/telebirr-js)
 
-A modern TypeScript/Node.js library for integrating **Telebirr Web Checkout (C2B)** payments. Telebirr is a mobile money service developed by Huawei and owned by Ethio telecom.
+A modern TypeScript/Node.js library for integrating **Telebirr Web Checkout (C2B)** payments, and the server side of **Telebirr In-App SDK** payments for mobile apps. Telebirr is a mobile money service developed by Huawei and owned by Ethio telecom.
 
 This library provides a simple, `async`/`await`-based API for handling Telebirr payments, fully compliant with the [Telebirr H5 C2B Web Payment Integration Guide](https://developer.ethiotelecom.et/docs/H5%20C2B%20Web%20Payment%20Integration%20Quick%20Guide/requestCreateOrder). It ships as native ESM + CommonJS with full TypeScript types, and has a single runtime dependency ([`undici`](https://github.com/nodejs/undici), the HTTP client Node's own `fetch` is built on) — everything else (signing, verification) runs on Node's built-in `crypto`.
 
@@ -70,8 +70,9 @@ That's it! The library handles token management, order creation, and checkout UR
 
 If your mobile app's Telebirr SDK initiates the payment instead of a browser
 redirect, use `createInAppPayment()`. There's no checkout URL for this flow —
-the `receiveCode` must be passed to the mobile SDK to continue the payment.
-This is the whole body of your app's "create order" endpoint:
+the `receiveCode` must be passed to the mobile SDK (native Android/iOS, or a
+Flutter plugin wrapping them) to continue the payment. This is the whole body
+of your app's "create order" endpoint:
 
 ```ts
 // POST /api/create-payment
@@ -88,9 +89,22 @@ Token management (with caching) is handled for you, as in `createCheckoutUrl()`.
 A runnable endpoint is the `/inapp/create-order` route in
 [`examples/checkout-server.js`](examples/checkout-server.js).
 
+The rest of the flow is the same as web checkout: Telebirr POSTs the signed
+notification to your `notifyUrl` (see [Handle Payment Notifications](#handle-payment-notifications)),
+and `getOrderStatus(result.merchOrderId)` confirms the payment
+server-to-server. The result the mobile SDK hands your app is only a hint — it
+can be missing (an expired Telebirr session returns nothing) or wrong, so never
+fulfil on it alone.
+
 Need the raw response or your own token handling? The lower-level
 `createInAppOrder(fabricToken, title, amount)` is still available and returns
 the full API response, with the code at `order.biz_content.receiveCode`.
+
+> **Upgrade to 3.3.0 if you create in-app orders.** 3.2.1 and earlier sent
+> `trade_type: "InApp"`. The gateway accepts it and returns a `receiveCode`, but
+> the Telebirr app then refuses the order with *"The trade type is not filled
+> in, or it is incorrect"*. 3.3.0 sends `"Cross-App"`, confirmed with a paid
+> order on the testbed.
 
 ## 📋 Configuration
 
@@ -153,6 +167,7 @@ Default endpoints used by the library:
 ## 💡 Key Features
 
 - ✅ **Simple API** - One-call checkout (`createCheckoutUrl`) and one-call verification (`getOrderStatus`), fully `async`/`await`
+- ✅ **In-App SDK orders** - One call (`createInAppPayment`) returns the `receiveCode` your mobile app hands to the Telebirr SDK
 - ✅ **Automatic Token Management** - Fabric tokens are fetched, cached until expiry, and refreshed for you
 - ✅ **Key normalization** - Bare base64 keys (as Ethio Telecom issues them) or PEM, both just work
 - ✅ **TLS that just works** - Bundles the CA the test gateway forgets to serve; no `verifySsl: false` needed
@@ -162,7 +177,7 @@ Default endpoints used by the library:
 - ✅ **Environment Support** - Automatic test/production URL handling
 - ✅ **Framework-agnostic** - Works with Express, Next.js (Node runtime), Fastify, plain Node `http`
 - ✅ **Dual ESM/CJS + full TypeScript types** - `import` or `require`, either way
-- ✅ **Full Compliance** - Follows the Telebirr H5 C2B Web Payment Integration spec
+- ✅ **Full Compliance** - Follows the Telebirr H5 C2B Web Payment Integration spec; in-app orders verified against the testbed
 
 ## 📖 Common Use Cases
 
@@ -641,6 +656,7 @@ This project is licensed under the MIT License.
 
 - [Telebirr Developer Portal](https://developer.ethiotelecom.et/)
 - [Telebirr H5 C2B Integration Guide](https://developer.ethiotelecom.et/docs/H5%20C2B%20Web%20Payment%20Integration%20Quick%20Guide/requestCreateOrder)
+- [Telebirr In-App SDK Integration Guide](https://developer.ethiotelecom.et/docs/In%20App%20SDK%20Integration/Introduction)
 - [npm package](https://www.npmjs.com/package/@melakudemeke/telebirr-js)
 - [GitHub Repository](https://github.com/MelakuDemeke/telebirr-js)
 - Looking for a PHP integration? See [telebirr-php](https://github.com/MelakuDemeke/telebirr-php)

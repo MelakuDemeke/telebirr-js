@@ -1,7 +1,7 @@
 {
   "name": "@melakudemeke/telebirr-js",
   "version": "3.3.0",
-  "description": "Modern TypeScript/Node.js library for Telebirr Web Checkout (H5 C2B) payments.",
+  "description": "Modern TypeScript/Node.js library for Telebirr payments: Web Checkout (H5 C2B) and In-App SDK orders.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
