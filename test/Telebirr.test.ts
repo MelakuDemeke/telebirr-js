@@ -107,7 +107,7 @@ describe('Telebirr.createOrder', () => {
 });
 
 describe('Telebirr.createInAppOrder', () => {
-  it('uses trade_type InApp and returns receiveCode', async () => {
+  it('uses trade_type Cross-App and returns receiveCode', async () => {
     const http = new FakeHttpClient([new HttpResponse(200, JSON.stringify({ code: '00000', biz_content: { receiveCode: 'RC1' } }))]);
     const client = new Telebirr(makeConfig(), null, http);
 
@@ -115,7 +115,44 @@ describe('Telebirr.createInAppOrder', () => {
     expect((result['biz_content'] as Record<string, unknown>)['receiveCode']).toBe('RC1');
 
     const sentBody = JSON.parse(http.calls[0]!.body);
-    expect(sentBody.biz_content.trade_type).toBe('InApp');
+    expect(sentBody.biz_content.trade_type).toBe('Cross-App');
+  });
+});
+
+describe('Telebirr.createInAppPayment (full flow)', () => {
+  it('chains applyFabricToken -> createInAppOrder and returns the receiveCode', async () => {
+    const receiveCode = 'TELEBIRR$BUYGOODS$123456$100.00$PID123$120m';
+    const http = new FakeHttpClient([
+      new HttpResponse(200, JSON.stringify({ token: 'Bearer abc' })),
+      new HttpResponse(200, JSON.stringify({ code: '0', biz_content: { merch_order_id: 'ORDER123', prepay_id: 'PID123', receiveCode } })),
+    ]);
+    const client = new Telebirr(makeConfig(), null, http);
+
+    const result = await client.createInAppPayment('Order 123', '100.00', 'ORDER123');
+
+    expect(result.receiveCode).toBe(receiveCode);
+    expect(result.merchOrderId).toBe('ORDER123');
+    expect(result.prepayId).toBe('PID123');
+    expect(result.toJSON()).toEqual({ receiveCode, merchOrderId: 'ORDER123', prepayId: 'PID123' });
+
+    expect(http.calls).toHaveLength(2);
+    expect(http.calls[1]!.url.endsWith('/payment/v1/inapp/createOrder')).toBe(true);
+    const sentBody = JSON.parse(http.calls[1]!.body);
+    expect(sentBody.biz_content.trade_type).toBe('Cross-App');
+    expect(sentBody.biz_content.merch_order_id).toBe('ORDER123');
+  });
+
+  it('generates a merchOrderId and tolerates a missing prepay_id', async () => {
+    const http = new FakeHttpClient([
+      new HttpResponse(200, JSON.stringify({ token: 'Bearer abc' })),
+      new HttpResponse(200, JSON.stringify({ code: '0', biz_content: { receiveCode: 'RC1' } })),
+    ]);
+    const client = new Telebirr(makeConfig(), null, http);
+
+    const result = await client.createInAppPayment('Order', 10);
+
+    expect(result.prepayId).toBeNull();
+    expect(result.merchOrderId).toMatch(/^[A-Za-z0-9]+$/);
   });
 });
 

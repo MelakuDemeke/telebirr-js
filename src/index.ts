@@ -1,6 +1,7 @@
 export { CheckoutResult } from './CheckoutResult.js';
 export { Config } from './Config.js';
 export type { ConfigOptions, TelebirrEnvironment } from './Config.js';
+export { InAppOrderResult } from './InAppOrderResult.js';
 export { KeyNormalizer } from './KeyNormalizer.js';
 export { NotificationHandler } from './NotificationHandler.js';
 export type { PaymentInfo, NotificationPaymentData } from './NotificationHandler.js';

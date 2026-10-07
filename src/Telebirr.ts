@@ -1,4 +1,5 @@
 import { CheckoutResult } from './CheckoutResult.js';
+import { InAppOrderResult } from './InAppOrderResult.js';
 import type { Config } from './Config.js';
 import { ApiError } from './errors/ApiError.js';
 import { InvalidParameterError } from './errors/InvalidParameterError.js';
@@ -295,7 +296,11 @@ export class Telebirr {
   }
 
   /**
-   * Request create order for the In-App SDK flow — `trade_type: "InApp"`.
+   * Request create order for the In-App SDK flow — `trade_type: "Cross-App"`.
+   *
+   * "Cross-App", not "InApp": the Telebirr app refuses an InApp order opened by
+   * the mobile SDK ("The trade type is not filled in, or it is incorrect").
+   * Confirmed on the testbed with merchant 192411 on 2026-10-07.
    *
    * Used when a mobile app's Telebirr SDK initiates the payment. Unlike the
    * web checkout flow, there is no checkout URL: the response's
@@ -307,7 +312,7 @@ export class Telebirr {
   async createInAppOrder(fabricToken: string, title: string, amount: string | number, merchOrderId?: string | null): Promise<TelebirrApiResponse> {
     const validated = this.validateOrderParams('createInAppOrder', title, amount, merchOrderId);
 
-    const reqObject = this.buildPreOrderRequest(validated.title, validated.amount, validated.merchOrderId, 'InApp');
+    const reqObject = this.buildPreOrderRequest(validated.title, validated.amount, validated.merchOrderId, 'Cross-App');
     const url = `${this.config.baseUrl}/payment/v1/inapp/createOrder`;
 
     const result = await this.sendApiRequest('createInAppOrder', url, reqObject, fabricToken);
@@ -490,6 +495,36 @@ export class Telebirr {
   }
 
   /**
+   * High-level helper for the In-App SDK flow: {@link applyFabricToken} + {@link createInAppOrder}.
+   *
+   * This is the whole body of a mobile app's "create order" endpoint: call
+   * it, persist the `merchOrderId`, and return the `receiveCode` to the app,
+   * which passes it to the Telebirr SDK. Token management (with caching) is
+   * handled for you, as in {@link createCheckoutUrl}.
+   *
+   * @param title Order title (auto-sanitized).
+   * @param amount Total amount (ETB).
+   * @param merchOrderId Optional merchant order id (`^[A-Za-z0-9]+$`). Generated if omitted.
+   *        Invalid ids throw rather than being silently rewritten.
+   */
+  async createInAppPayment(title: string, amount: string | number, merchOrderId?: string | null): Promise<InAppOrderResult> {
+    // Resolve the id up-front (generate if empty, throw if invalid) so we can
+    // report back the EXACT value Telebirr will use.
+    const resolvedMerchOrderId = ParameterValidator.validateMerchantOrderId(merchOrderId ?? null, false);
+
+    const fabricToken = await this.getFabricToken();
+    const order = await this.createInAppOrder(fabricToken, title, amount, resolvedMerchOrderId);
+    const bizContent = order['biz_content'] as Record<string, unknown>;
+    const prepayId = bizContent['prepay_id'];
+
+    return new InAppOrderResult(
+      String(bizContent['receiveCode']),
+      resolvedMerchOrderId,
+      typeof prepayId === 'string' && prepayId !== '' ? prepayId : null
+    );
+  }
+
+  /**
    * High-level helper: confirm an order's real status server-to-server.
    * Symmetric counterpart to {@link createCheckoutUrl} — token management
    * (with caching) and response mapping are handled for you.
@@ -613,7 +648,7 @@ export class Telebirr {
     }
   }
 
-  private buildPreOrderRequest(title: string, amount: string, merchOrderId: string, tradeType: 'Checkout' | 'InApp'): SignableRequest {
+  private buildPreOrderRequest(title: string, amount: string, merchOrderId: string, tradeType: 'Checkout' | 'Cross-App'): SignableRequest {
     const req: SignableRequest = {
       timestamp: Signer.createTimeStamp(),
       nonce_str: Signer.createNonceStr(),

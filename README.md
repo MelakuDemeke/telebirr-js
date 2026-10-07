@@ -69,18 +69,28 @@ That's it! The library handles token management, order creation, and checkout UR
 ### In-App SDK Payment
 
 If your mobile app's Telebirr SDK initiates the payment instead of a browser
-redirect, use `createInAppOrder()`. There's no checkout URL for this flow —
-the response's `receiveCode` must be passed to the mobile SDK to continue the
-payment.
+redirect, use `createInAppPayment()`. There's no checkout URL for this flow —
+the `receiveCode` must be passed to the mobile SDK to continue the payment.
+This is the whole body of your app's "create order" endpoint:
 
 ```ts
-const tokenInfo = await client.applyFabricToken();
-const order = await client.createInAppOrder(tokenInfo.token, 'Order 123', '100.00');
-const receiveCode = (order.biz_content as Record<string, unknown>)['receiveCode'];
+// POST /api/create-payment
+const result = await client.createInAppPayment('Order 123', '100.00');
+
+// Persist this BEFORE answering. It's how you match the notification.
+await saveOrder(result.merchOrderId, result.prepayId);
 
 // Send the receiveCode to your mobile app for the SDK to complete the payment.
-res.json({ receiveCode });
+res.json(result); // { receiveCode, merchOrderId, prepayId }
 ```
+
+Token management (with caching) is handled for you, as in `createCheckoutUrl()`.
+A runnable endpoint is the `/inapp/create-order` route in
+[`examples/checkout-server.js`](examples/checkout-server.js).
+
+Need the raw response or your own token handling? The lower-level
+`createInAppOrder(fabricToken, title, amount)` is still available and returns
+the full API response, with the code at `order.biz_content.receiveCode`.
 
 ## 📋 Configuration
 

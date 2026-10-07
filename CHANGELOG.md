@@ -3,6 +3,32 @@
 All notable changes to `@melakudemeke/telebirr-js` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [SemVer](https://semver.org/).
 
+## [3.3.0] — 2026-10-07
+
+One-call order creation for the In-App SDK flow, and a fix that makes in-app
+orders payable. No signature changes.
+
+### Fixed
+- **In-App orders are now created with `trade_type: "Cross-App"`.** They were
+  sent as `"InApp"`, which the gateway accepts and answers with a `receiveCode`
+  — but the Telebirr app then refuses to open that order from the mobile SDK,
+  showing *"The trade type is not filled in, or it is incorrect"* on an empty
+  payment screen. So `createInAppOrder()` in 3.2.1 and earlier returned a code
+  no customer could pay. `"InApp"` is for mini apps running inside Telebirr; a
+  stand-alone app using the SDK is `"Cross-App"`. Confirmed on the testbed with
+  merchant 192411 on 2026-10-07. `business_type` is not required.
+
+### Added
+- **`Telebirr.createInAppPayment(title, amount, merchOrderId?)`** — the In-App
+  counterpart of `createCheckoutUrl()`. It fetches (and caches) the fabric
+  token, creates the in-app order and returns an `InAppOrderResult` with
+  `receiveCode`, `merchOrderId`, `prepayId` and `toJSON()`. This is the whole
+  body of a mobile app's "create order" endpoint: `res.json(result)` and the
+  app hands the `receiveCode` to the Telebirr SDK.
+- **`InAppOrderResult`** is exported from the package root.
+- **`/inapp/create-order` route in `examples/checkout-server.js`** — accepts
+  `{title, amount}` and answers `{receiveCode, merchOrderId, prepayId}`.
+
 ## [3.2.1] — 2026-09-21
 
 ### Fixed

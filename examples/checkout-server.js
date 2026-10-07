@@ -2,7 +2,8 @@
 //
 //   node examples/checkout-server.js
 //
-// Then visit http://localhost:3000/checkout to start a payment.
+// Then visit http://localhost:3000/checkout to start a payment, or point a
+// mobile app at POST http://<your-ip>:3000/inapp/create-order.
 import { createServer } from 'node:http';
 import { NotificationHandler, ReturnUrlHandler, Telebirr, TelebirrError } from '../dist/index.js';
 import { config } from './config.js';
@@ -21,6 +22,35 @@ const server = createServer(async (req, res) => {
 
       res.writeHead(302, { Location: result.checkoutUrl });
       res.end();
+      return;
+    }
+
+    // In-App SDK flow: a mobile app (Flutter, Android, iOS) POSTs
+    // { title, amount } and gets back the receiveCode for the Telebirr SDK.
+    if (url.pathname === '/inapp/create-order' && req.method === 'POST') {
+      let input;
+      try {
+        input = JSON.parse(await readBody(req));
+      } catch {
+        input = null;
+      }
+      // In a real app, look the order up by id and take the title and amount
+      // from YOUR database. Never charge an amount the client sent.
+      const title = String(input?.title ?? '').trim();
+      const amount = String(input?.amount ?? '').trim();
+      if (!title || !amount) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'title and amount are required' }));
+        return;
+      }
+
+      const result = await client.createInAppPayment(title, amount);
+
+      // Persist result.merchOrderId against your order here, BEFORE answering.
+      console.log('Created in-app order', result.merchOrderId);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result)); // { receiveCode, merchOrderId, prepayId }
       return;
     }
 
@@ -65,6 +95,11 @@ const server = createServer(async (req, res) => {
   } catch (err) {
     if (err instanceof TelebirrError) {
       console.error('Telebirr error:', err.message);
+      if (url.pathname.startsWith('/inapp/')) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Could not create the order' }));
+        return;
+      }
       res.writeHead(400, { 'Content-Type': 'text/plain' });
       res.end('Payment error');
       return;
