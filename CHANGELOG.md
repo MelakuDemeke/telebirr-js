@@ -3,6 +3,17 @@
 All notable changes to `@melakudemeke/telebirr-js` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [SemVer](https://semver.org/).
 
+## [3.4.1] — 2026-10-27
+
+### Fixed
+- **Every create order was refused in production** with `60320019` "The
+  identity information is illegal." 3.4.0 sent `payee_type: "3000"`, the value
+  in the requestCreateOrder parameter table; telebirr production only accepts
+  **`"5000"`**, the value telebirr's own sample code sends. Verified live
+  (merchant 600980, 2026-10-27): no payee fields — accepted; `3000` — refused
+  60320019; `5000` — accepted. Upgrade from 3.4.0 is required; 3.3.x is not
+  affected (it sent no payee fields).
+
 ## [3.4.0] — 2026-10-26
 
 Payee and payer identity fields on create order, as requested by the Telebirr

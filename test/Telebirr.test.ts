@@ -104,7 +104,8 @@ describe('Telebirr.createOrder', () => {
 
     await client.createOrder('Bearer abc', 'Order', '10.00', 'ORDER123');
     const biz = JSON.parse(http.calls[0]!.body).biz_content;
-    expect(biz.payee_type).toBe('3000');
+    // 5000, not the spec table's 3000: production refuses 3000 (60320019).
+    expect(biz.payee_type).toBe('5000');
     expect(biz.payee_identifier).toBe('123456');
     expect(biz.payee_identifier_type).toBe('04');
     expect(biz.payer_type).toBeUndefined();
