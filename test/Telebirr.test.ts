@@ -98,6 +98,36 @@ describe('Telebirr.createOrder', () => {
     await expect(client.createOrder('Bearer abc', 'Order', '10.00', 'ORDER-123')).rejects.toThrow(InvalidParameterError);
   });
 
+  it('always sends the payee fields and no payer fields without a phone', async () => {
+    const http = new FakeHttpClient([new HttpResponse(200, JSON.stringify({ code: '00000', biz_content: { prepay_id: 'PID123' } }))]);
+    const client = new Telebirr(makeConfig(), null, http);
+
+    await client.createOrder('Bearer abc', 'Order', '10.00', 'ORDER123');
+    const biz = JSON.parse(http.calls[0]!.body).biz_content;
+    expect(biz.payee_type).toBe('3000');
+    expect(biz.payee_identifier).toBe('123456');
+    expect(biz.payee_identifier_type).toBe('04');
+    expect(biz.payer_type).toBeUndefined();
+    expect(biz.payer_identifier).toBeUndefined();
+    expect(biz.payer_identifier_type).toBeUndefined();
+  });
+
+  it('sends the payer fields with a normalized phone when one is given', async () => {
+    const http = new FakeHttpClient([new HttpResponse(200, JSON.stringify({ code: '00000', biz_content: { prepay_id: 'PID123' } }))]);
+    const client = new Telebirr(makeConfig(), null, http);
+
+    await client.createOrder('Bearer abc', 'Order', '10.00', 'ORDER123', '0989000032');
+    const biz = JSON.parse(http.calls[0]!.body).biz_content;
+    expect(biz.payer_type).toBe('1000');
+    expect(biz.payer_identifier).toBe('251989000032');
+    expect(biz.payer_identifier_type).toBe('01');
+  });
+
+  it('rejects a payer phone that is not an Ethiopian mobile number', async () => {
+    const client = new Telebirr(makeConfig(), null, new FakeHttpClient([]));
+    await expect(client.createOrder('Bearer abc', 'Order', '10.00', 'ORDER123', '12345')).rejects.toThrow(InvalidParameterError);
+  });
+
   it('throws ApiError when prepay_id is missing from the response', async () => {
     const http = new FakeHttpClient([new HttpResponse(200, JSON.stringify({ code: '00000', biz_content: {} }))]);
     const client = new Telebirr(makeConfig(), null, http);

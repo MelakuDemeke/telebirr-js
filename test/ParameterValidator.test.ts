@@ -90,3 +90,19 @@ describe('ParameterValidator.isValidMerchantOrderId / generateMerchantOrderId', 
     }
   });
 });
+
+describe('ParameterValidator.validatePayerPhone', () => {
+  it.each([
+    ['0989000032', '251989000032'],
+    ['989000032', '251989000032'],
+    ['+251 989 000 032', '251989000032'],
+    ['251989000032', '251989000032'],
+    ['0712345678', '251712345678'],
+  ])('normalizes %s', (input, expected) => {
+    expect(ParameterValidator.validatePayerPhone(input)).toBe(expected);
+  });
+
+  it.each(['', '0111234567', '25198900003', '+1 555 123 4567'])('rejects %s', (input) => {
+    expect(() => ParameterValidator.validatePayerPhone(input)).toThrow(InvalidParameterError);
+  });
+});

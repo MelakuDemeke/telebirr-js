@@ -112,7 +112,7 @@ const TOKEN_EXPIRY_SAFETY_MARGIN_MS = 60_000;
 /** Cache TTL when the token response carries no parseable expirationDate. */
 const TOKEN_FALLBACK_TTL_MS = 5 * 60_000;
 
-const SENSITIVE_KEYS = new Set(['sign', 'msisdn', 'phone', 'phone_no', 'phonenumber', 'payer_name', 'customer_name', 'buyer', 'openid', 'open_id', 'id_no', 'email']);
+const SENSITIVE_KEYS = new Set(['sign', 'msisdn', 'phone', 'phone_no', 'phonenumber', 'payer_name', 'customer_name', 'buyer', 'openid', 'open_id', 'id_no', 'email', 'payer_identifier']);
 
 /**
  * Telebirr Web Checkout client (modern H5 C2B API).
@@ -276,10 +276,10 @@ export class Telebirr {
    * @throws ApiError on API errors, invalid responses, or a missing `prepay_id`.
    * @throws InvalidParameterError on parameter validation failures.
    */
-  async createOrder(fabricToken: string, title: string, amount: string | number, merchOrderId?: string | null): Promise<CreateOrderResponse> {
-    const validated = this.validateOrderParams('createOrder', title, amount, merchOrderId);
+  async createOrder(fabricToken: string, title: string, amount: string | number, merchOrderId?: string | null, payerPhone?: string | null): Promise<CreateOrderResponse> {
+    const validated = this.validateOrderParams('createOrder', title, amount, merchOrderId, payerPhone);
 
-    const reqObject = this.buildPreOrderRequest(validated.title, validated.amount, validated.merchOrderId, 'Checkout');
+    const reqObject = this.buildPreOrderRequest(validated.title, validated.amount, validated.merchOrderId, 'Checkout', validated.payerPhone);
     const url = `${this.config.baseUrl}/payment/v1/merchant/preOrder`;
 
     const result = await this.sendApiRequest('createOrder', url, reqObject, fabricToken);
@@ -309,10 +309,10 @@ export class Telebirr {
    * @throws ApiError on API errors, invalid responses, or a missing `receiveCode`.
    * @throws InvalidParameterError on parameter validation failures.
    */
-  async createInAppOrder(fabricToken: string, title: string, amount: string | number, merchOrderId?: string | null): Promise<TelebirrApiResponse> {
-    const validated = this.validateOrderParams('createInAppOrder', title, amount, merchOrderId);
+  async createInAppOrder(fabricToken: string, title: string, amount: string | number, merchOrderId?: string | null, payerPhone?: string | null): Promise<TelebirrApiResponse> {
+    const validated = this.validateOrderParams('createInAppOrder', title, amount, merchOrderId, payerPhone);
 
-    const reqObject = this.buildPreOrderRequest(validated.title, validated.amount, validated.merchOrderId, 'Cross-App');
+    const reqObject = this.buildPreOrderRequest(validated.title, validated.amount, validated.merchOrderId, 'Cross-App', validated.payerPhone);
     const url = `${this.config.baseUrl}/payment/v1/inapp/createOrder`;
 
     const result = await this.sendApiRequest('createInAppOrder', url, reqObject, fabricToken);
@@ -481,14 +481,16 @@ export class Telebirr {
    * @param amount Total amount (ETB).
    * @param merchOrderId Optional merchant order id (`^[A-Za-z0-9]+$`). Generated if omitted.
    *        Invalid ids throw rather than being silently rewritten.
+   * @param payerPhone Optional customer telebirr number (`0911…`, `+2519…`). When given,
+   *        `payer_type` / `payer_identifier` / `payer_identifier_type` are sent.
    */
-  async createCheckoutUrl(title: string, amount: string | number, merchOrderId?: string | null): Promise<CheckoutResult> {
+  async createCheckoutUrl(title: string, amount: string | number, merchOrderId?: string | null, payerPhone?: string | null): Promise<CheckoutResult> {
     // Resolve the id up-front (generate if empty, throw if invalid) so we can
     // report back the EXACT value Telebirr will use.
     const resolvedMerchOrderId = ParameterValidator.validateMerchantOrderId(merchOrderId ?? null, false);
 
     const fabricToken = await this.getFabricToken();
-    const order = await this.createOrder(fabricToken, title, amount, resolvedMerchOrderId);
+    const order = await this.createOrder(fabricToken, title, amount, resolvedMerchOrderId, payerPhone);
     const checkoutUrl = this.buildCheckoutUrl(order.biz_content.prepay_id);
 
     return new CheckoutResult(checkoutUrl, resolvedMerchOrderId, order.biz_content.prepay_id);
@@ -506,14 +508,16 @@ export class Telebirr {
    * @param amount Total amount (ETB).
    * @param merchOrderId Optional merchant order id (`^[A-Za-z0-9]+$`). Generated if omitted.
    *        Invalid ids throw rather than being silently rewritten.
+   * @param payerPhone Optional customer telebirr number (`0911…`, `+2519…`). When given,
+   *        `payer_type` / `payer_identifier` / `payer_identifier_type` are sent.
    */
-  async createInAppPayment(title: string, amount: string | number, merchOrderId?: string | null): Promise<InAppOrderResult> {
+  async createInAppPayment(title: string, amount: string | number, merchOrderId?: string | null, payerPhone?: string | null): Promise<InAppOrderResult> {
     // Resolve the id up-front (generate if empty, throw if invalid) so we can
     // report back the EXACT value Telebirr will use.
     const resolvedMerchOrderId = ParameterValidator.validateMerchantOrderId(merchOrderId ?? null, false);
 
     const fabricToken = await this.getFabricToken();
-    const order = await this.createInAppOrder(fabricToken, title, amount, resolvedMerchOrderId);
+    const order = await this.createInAppOrder(fabricToken, title, amount, resolvedMerchOrderId, payerPhone);
     const bizContent = order['biz_content'] as Record<string, unknown>;
     const prepayId = bizContent['prepay_id'];
 
@@ -624,13 +628,15 @@ export class Telebirr {
     operation: string,
     title: string,
     amount: string | number,
-    merchOrderId: string | null | undefined
-  ): { title: string; amount: string; merchOrderId: string } {
+    merchOrderId: string | null | undefined,
+    payerPhone?: string | null
+  ): { title: string; amount: string; merchOrderId: string; payerPhone: string | null } {
     try {
       return {
         title: ParameterValidator.validateTitle(title, true),
         amount: ParameterValidator.validateAmount(amount),
         merchOrderId: ParameterValidator.validateMerchantOrderId(merchOrderId ?? null, false),
+        payerPhone: payerPhone ? ParameterValidator.validatePayerPhone(payerPhone) : null,
       };
     } catch (e) {
       this.logValidationFailure(operation, e);
@@ -648,7 +654,13 @@ export class Telebirr {
     }
   }
 
-  private buildPreOrderRequest(title: string, amount: string, merchOrderId: string, tradeType: 'Checkout' | 'Cross-App'): SignableRequest {
+  private buildPreOrderRequest(
+    title: string,
+    amount: string,
+    merchOrderId: string,
+    tradeType: 'Checkout' | 'Cross-App',
+    payerPhone: string | null = null
+  ): SignableRequest {
     const req: SignableRequest = {
       timestamp: Signer.createTimeStamp(),
       nonce_str: Signer.createNonceStr(),
@@ -666,7 +678,18 @@ export class Telebirr {
       total_amount: amount,
       trans_currency: 'ETB',
       timeout_express: '120m',
+      // Who receives the money: our organization, paid through its short code.
+      payee_type: '3000',
+      payee_identifier: this.config.merchantCode,
+      payee_identifier_type: '04',
     };
+
+    // Who pays: the customer's telebirr account, when the caller knows it.
+    if (payerPhone) {
+      biz['payer_type'] = '1000';
+      biz['payer_identifier'] = payerPhone;
+      biz['payer_identifier_type'] = '01';
+    }
 
     if (tradeType === 'Checkout' && this.config.redirectUrl) {
       biz['redirect_url'] = this.config.redirectUrl;

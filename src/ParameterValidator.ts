@@ -148,6 +148,29 @@ export class ParameterValidator {
   }
 
   /** Validate a URL, used for `notifyUrl`/`redirectUrl`. */
+  /**
+   * Normalize a customer's telebirr phone number to the `2519XXXXXXXX` /
+   * `2517XXXXXXXX` form Telebirr expects in `payer_identifier`.
+   *
+   * Accepts `0911223344`, `911223344`, `+251911223344`, `251911223344`
+   * (spaces and dashes ignored). Anything else throws.
+   */
+  static validatePayerPhone(phone: string): string {
+    const digits = String(phone ?? '').replace(/[\s-]/g, '').replace(/^\+/, '');
+    let normalized = digits;
+    if (/^0[79]\d{8}$/.test(digits)) normalized = `251${digits.slice(1)}`;
+    else if (/^[79]\d{8}$/.test(digits)) normalized = `251${digits}`;
+    if (!/^251[79]\d{8}$/.test(normalized)) {
+      throw new InvalidParameterError(
+        'payerPhone',
+        phone,
+        'Payer phone must be an Ethiopian mobile number',
+        "Use a number like '0911223344' or '251911223344'"
+      );
+    }
+    return normalized;
+  }
+
   static validateUrl(url: string, type = 'url'): string {
     if (url === '') {
       throw new InvalidParameterError(type, url, `${type} cannot be empty`, "Provide a valid URL (e.g., 'https://example.com/notify.php')");
